@@ -1,0 +1,17 @@
+{
+  "name": "@technyu/db",
+  "type": "module",
+  "scripts": {
+    "dev": "bun run studio",
+    "studio": "bun --env-file=../../.env ../../node_modules/.bin/drizzle-kit studio --config=drizzle.config.ts",
+    "push": "bun --env-file=../../.env ../../node_modules/.bin/drizzle-kit push --config=drizzle.config.ts",
+    "generate": "bun --env-file=../../.env ../../node_modules/.bin/drizzle-kit generate --config=drizzle.config.ts"
+  },
+  "dependencies": {
+    "@technyu/application": "workspace:*",
+    "@technyu/core": "workspace:*",
+    "drizzle-orm": "^0.39.1",
+    "postgres": "^3.4.5"
+  },
+  "exports": { ".": "./src/index.ts" }
+}

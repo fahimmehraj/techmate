@@ -1,0 +1,13 @@
+{
+  "name": "@technyu/workflows",
+  "private": true,
+  "type": "module",
+  "exports": { ".": "./src/index.ts" },
+  "dependencies": {
+    "@technyu/adapters": "workspace:*",
+    "@technyu/application": "workspace:*",
+    "@technyu/core": "workspace:*",
+    "@technyu/db": "workspace:*",
+    "inngest": "^3.40.1"
+  }
+}

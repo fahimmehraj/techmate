@@ -1,0 +1,53 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: technyu_coordinator
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+    ports:
+      - "5432:5432"
+    volumes:
+      - ./infra/postgres/init/01-create-inngest.sql:/docker-entrypoint-initdb.d/01-create-inngest.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d technyu_coordinator"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+  inngest:
+    image: inngest/inngest:latest
+    command:
+      - inngest
+      - start
+      - --sdk-url
+      - http://host.docker.internal:3000/api/inngest
+      - --sdk-url
+      - http://host.docker.internal:3001/api/inngest
+      - --poll-interval
+      - "2"
+    ports:
+      - "8288:8288"
+    environment:
+      INNGEST_EVENT_KEY: ${INNGEST_EVENT_KEY:-0123456789abcdef0123456789abcdef}
+      INNGEST_SIGNING_KEY: ${INNGEST_SIGNING_KEY:-0123456789abcdef0123456789abcdef}
+      INNGEST_POSTGRES_URI: postgres://inngest:inngest@postgres:5432/inngest
+      INNGEST_REDIS_URI: redis://inngest-redis:6379
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      inngest-redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "inngest", "alpha", "doctor", "healthcheck"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+  inngest-redis:
+    image: redis:7-alpine
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10

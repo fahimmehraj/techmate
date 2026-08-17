@@ -1,0 +1,17 @@
+{
+  "name": "@technyu/adapters",
+  "type": "module",
+  "dependencies": {
+    "@technyu/application": "workspace:*",
+    "@technyu/core": "workspace:*",
+    "@technyu/db": "workspace:*",
+    "playwright": "^1.58.0",
+    "zod": "^3.24.2"
+  },
+  "exports": {
+    "./discord": "./src/discord/index.ts",
+    "./google": "./src/google/index.ts",
+    "./rooms": "./src/rooms/index.ts",
+    "./crypto": "./src/crypto.ts"
+  }
+}

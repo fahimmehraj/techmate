@@ -1,0 +1,51 @@
+{
+  "$schema": "https://turbo.build/schema.json",
+  "globalEnv": [
+    "DATABASE_URL",
+    "APP_BASE_URL",
+    "DISCORD_PUBLIC_KEY",
+    "DISCORD_APPLICATION_ID",
+    "DISCORD_BOT_TOKEN",
+    "GOOGLE_CLIENT_ID",
+    "GOOGLE_CLIENT_SECRET",
+    "TOKEN_ENCRYPTION_KEY_BASE64",
+    "INNGEST_BASE_URL",
+    "INNGEST_EVENT_KEY",
+    "INNGEST_SIGNING_KEY",
+    "INNGEST_SERVE_HOST",
+    "ROOM_INNGEST_SERVE_HOST",
+    "ROOM_WORKER_PORT",
+    "NGROK_DOMAIN",
+    "PORT"
+  ],
+  "globalPassThroughEnv": [
+    "DATABASE_URL",
+    "APP_BASE_URL",
+    "DISCORD_PUBLIC_KEY",
+    "DISCORD_APPLICATION_ID",
+    "DISCORD_BOT_TOKEN",
+    "GOOGLE_CLIENT_ID",
+    "GOOGLE_CLIENT_SECRET",
+    "TOKEN_ENCRYPTION_KEY_BASE64",
+    "INNGEST_BASE_URL",
+    "INNGEST_EVENT_KEY",
+    "INNGEST_SIGNING_KEY",
+    "INNGEST_SERVE_HOST",
+    "ROOM_INNGEST_SERVE_HOST",
+    "ROOM_WORKER_PORT",
+    "NGROK_DOMAIN",
+    "PORT"
+  ],
+  "tasks": {
+    "dev": {
+      "cache": false,
+      "persistent": true
+    },
+    "//#typecheck:all": {
+      "outputs": []
+    },
+    "//#test:all": {
+      "outputs": []
+    }
+  }
+}

@@ -1,0 +1,12 @@
+{
+  "name": "@technyu/room-worker",
+  "type": "module",
+  "scripts": { "dev": "bun --env-file=../../.env --watch src/main.ts" },
+  "dependencies": {
+    "@technyu/adapters": "workspace:*",
+    "@technyu/application": "workspace:*",
+    "@technyu/db": "workspace:*",
+    "@technyu/workflows": "workspace:*",
+    "inngest": "^3.40.1"
+  }
+}
