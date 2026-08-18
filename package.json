@@ -5,14 +5,15 @@
   "packageManager": "bun@1.3.13",
   "workspaces": ["apps/*", "packages/*"],
   "scripts": {
-    "dev": "APP_BASE_URL=\"https://${NGROK_DOMAIN:?NGROK_DOMAIN must be set}\" turbo run dev --ui=tui --filter=@technyu/api --filter=@technyu/web --filter=@technyu/room-worker --filter=@technyu/infra --filter=@technyu/db --filter=@technyu/tunnel",
-    "dev:local": "turbo run dev --ui=tui --filter=@technyu/api --filter=@technyu/web --filter=@technyu/room-worker --filter=@technyu/infra --filter=@technyu/db",
+    "dev": "APP_BASE_URL=\"https://${NGROK_DOMAIN:?NGROK_DOMAIN must be set}\" turbo run dev //#dev:infra //#dev:tunnel --ui=tui --filter=@technyu/api --filter=@technyu/web --filter=@technyu/room-worker --filter=@technyu/db",
+    "dev:local": "turbo run dev //#dev:infra --ui=tui --filter=@technyu/api --filter=@technyu/web --filter=@technyu/room-worker --filter=@technyu/db",
     "dev:public": "bun run dev",
     "dev:api": "turbo run dev --ui=tui --filter=@technyu/api",
-    "dev:infra": "turbo run dev --ui=tui --filter=@technyu/infra",
+    "dev:infra": "docker compose --env-file .env -f infra/local/compose.yml up",
+    "infra:down": "docker compose --env-file .env -f infra/local/compose.yml down",
     "dev:rooms": "turbo run dev --ui=tui --filter=@technyu/room-worker",
     "dev:db": "turbo run dev --ui=tui --filter=@technyu/db",
-    "dev:tunnel": "turbo run dev --ui=tui --filter=@technyu/tunnel",
+    "dev:tunnel": "ngrok http --domain=\"${NGROK_DOMAIN:?NGROK_DOMAIN must be set}\" 3000 --log=stdout",
     "build:web": "bun --filter @technyu/web build",
     "test": "turbo run test:all --filter=//",
     "test:all": "bun test tests",
@@ -26,6 +27,7 @@
   "devDependencies": {
     "@types/bun": "latest",
     "drizzle-kit": "latest",
+    "railway": "3.10.0",
     "typescript": "^5.7.3",
     "turbo": "^2.5.0"
   }

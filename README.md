@@ -19,23 +19,27 @@ The RoomProvider interface is available in `@technyu/application`. The eLab/Once
 ## Local development
 
 1. Copy `.env.example` to `.env` and fill in the Discord and Google credentials.
-2. Start local infrastructure: `docker compose up -d`. This starts one PostgreSQL container with separate `technyu_coordinator` and `inngest` databases, plus Inngest and Redis.
-3. For local development, synchronize the database directly from the Drizzle schema with `bun run db:push`.
-4. Install packages: `bun install`.
-5. Install Chromium once for the dedicated room worker: `bunx playwright install chromium`.
-6. Run `bun dev`. Turborepo starts the API, React planner build watcher, Playwright room workflow host, the root Compose infrastructure stack, and ngrok tunnel in one terminal TUI.
-6. Set `NGROK_DOMAIN` to your reserved ngrok domain. `bun dev` derives `APP_BASE_URL` from it, then set Discord's interactions endpoint to `/discord/interactions`.
-8. Register commands with `bun scripts/register-discord-commands.ts`.
+2. Install packages: `bun install`.
+3. Install Chromium once for the dedicated room worker: `bunx playwright install chromium`.
+4. Set `NGROK_DOMAIN` to your reserved ngrok domain, then run `bun dev`. Turborepo starts the API, React planner build watcher, Playwright room workflow host, local Compose stack, and ngrok tunnel in one terminal TUI.
+5. Once PostgreSQL is healthy, synchronize the local database directly from the Drizzle schema with `bun run db:push` in a second terminal.
+6. Register commands with `bun scripts/register-discord-commands.ts`.
 
-Use `bun run dev:api`, `bun run dev:infra`, or `bun run dev:rooms` to run one process alone. `bun run typecheck` and `bun test` use Turbo's cache for the repository-wide check. `bun run db:push` is the canonical development schema command; `bun run db:studio` opens Drizzle Studio. `db:generate` and `db:migrate` remain available only when we deliberately introduce a migration-based deployment workflow.
+Use `bun run dev:api`, `bun run dev:infra`, or `bun run dev:rooms` to run one process alone. `bun run dev:infra` starts just the local PostgreSQL, Redis, and Inngest stack. `bun run typecheck` and `bun test` use Turbo's cache for the repository-wide check. `bun run db:push` is the canonical development schema command; `bun run db:studio` opens Drizzle Studio. `bun run db:migrate` is the production migration command and is run only by the API service before deployment.
 
 `bun dev` is the public-development command. It requires `NGROK_DOMAIN`, starts ngrok with `--domain`, and exports `APP_BASE_URL=https://$NGROK_DOMAIN` to every Turbo task. Use that stable origin for Discord's interaction endpoint and Google's redirect URI. Use `bun run dev:local` when no public tunnel is wanted.
 
 `GOOGLE_CLIENT_ID` and `GOOGLE_CLIENT_SECRET` belong to the coordinator application, not to each Discord server. Configure one Google OAuth web client with `${APP_BASE_URL}/oauth/google/callback` as an authorized redirect URI. `TOKEN_ENCRYPTION_KEY_BASE64` is a random 32-byte base64 secret used to encrypt refresh tokens at rest (for example: `openssl rand -base64 32`).
 
-`bun dev` also starts Inngest at `http://localhost:8288`. The API uses `INNGEST_BASE_URL=http://localhost:8288`; Inngest persists in the dedicated `inngest` database inside the same local PostgreSQL container as the Coordinator database. The Compose service explicitly syncs its function endpoints from `http://host.docker.internal:3000/api/inngest` and `http://host.docker.internal:3001/api/inngest`, then polls every two seconds to survive watcher restarts. Set the same `INNGEST_EVENT_KEY` and `INNGEST_SIGNING_KEY` in the application and Compose environment. Ngrok is only needed for Discord and Google to reach the API, not for Inngest.
+`bun dev` also starts Inngest at `http://localhost:8288`. The API uses `INNGEST_BASE_URL=http://localhost:8288`; Inngest persists in the dedicated `inngest` database inside the same local PostgreSQL container as the Coordinator database. The local Compose service at `infra/local/compose.yml` explicitly syncs its function endpoints from `http://host.docker.internal:3000/api/inngest` and `http://host.docker.internal:3001/api/inngest`, then polls every two seconds to survive watcher restarts. Set the same `INNGEST_EVENT_KEY` and `INNGEST_SIGNING_KEY` in the application and Compose environment. Ngrok is only needed for Discord and Google to reach the API, not for Inngest.
 
-To reset local state, run `docker compose down -v`, then `docker compose up -d` and `bun run db:push`. The PostgreSQL initialization script creates the dedicated Inngest role and database only when its data directory is empty.
+To reset local state, run `docker compose --env-file .env -f infra/local/compose.yml down -v`, then `bun run dev:infra` and `bun run db:push`. The PostgreSQL initialization script creates the dedicated Inngest role and database only when its data directory is empty.
+
+## Railway production
+
+Production uses the API as the single public endpoint. The Vite planner remains a separate build workspace: Railway builds `apps/web/dist` as part of the API deployment, and the API serves it at `/plan/*`. It is not a standalone Railway service.
+
+The self-hosted production workflow stack consists of the public API, private room worker, private Inngest image service, application PostgreSQL, dedicated Inngest PostgreSQL, and Redis. [`.railway/railway.ts`](.railway/railway.ts) is the single Railway infrastructure definition; it owns service sources, deploy settings, managed databases, and private-network references. The bootstrap process and Railway-managed secret inventory live in [`.railway/README.md`](.railway/README.md). The Vite workspace is deliberately not a Railway service.
 
 ## Job observability
 

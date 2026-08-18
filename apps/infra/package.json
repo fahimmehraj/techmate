@@ -1,8 +1,0 @@
-{
-  "name": "@technyu/infra",
-  "private": true,
-  "scripts": {
-    "dev": "docker compose --env-file ../../.env -f ../../docker-compose.yml up",
-    "down": "docker compose --env-file ../../.env -f ../../docker-compose.yml down"
-  }
-}

@@ -11,5 +11,5 @@
     "jsx": "react-jsx",
     "types": ["bun"]
   },
-  "include": ["apps/**/*.ts", "apps/**/*.tsx", "packages/**/*.ts", "tests/**/*.ts"]
+  "include": [".railway/**/*.ts", "apps/**/*.ts", "apps/**/*.tsx", "packages/**/*.ts", "tests/**/*.ts"]
 }

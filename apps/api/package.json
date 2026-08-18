@@ -2,7 +2,8 @@
   "name": "@technyu/api",
   "type": "module",
   "scripts": {
-    "dev": "bun --env-file=../../.env --watch src/server.ts"
+    "dev": "bun --env-file=../../.env --watch src/server.ts",
+    "start": "bun src/server.ts"
   },
   "dependencies": {
     "@technyu/adapters": "workspace:*",

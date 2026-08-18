@@ -6,3 +6,6 @@ dist/
 coverage/
 drizzle/
 .turbo/
+.railway/*
+!.railway/railway.ts
+!.railway/README.md

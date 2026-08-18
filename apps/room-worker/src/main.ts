@@ -4,7 +4,7 @@ import { createRoomWorkflowFunctions, InngestOutboxPublisher, roomInngest, workf
 
 const repository = new PostgresCoordinatorRepository();
 const outboxPublisher = new InngestOutboxPublisher(repository);
-const port = Number(process.env.ROOM_WORKER_PORT ?? 3001);
+const port = Number(process.env.PORT ?? process.env.ROOM_WORKER_PORT ?? 3001);
 const inngestHandler = serve({
   client: roomInngest,
   functions: createRoomWorkflowFunctions(repository, outboxPublisher),

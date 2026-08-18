@@ -1,7 +1,0 @@
-{
-  "name": "@technyu/tunnel",
-  "private": true,
-  "scripts": {
-    "dev": "ngrok http --domain=\"${NGROK_DOMAIN:?NGROK_DOMAIN must be set}\" 3000 --log=stdout"
-  }
-}

@@ -7,6 +7,7 @@
       "devDependencies": {
         "@types/bun": "latest",
         "drizzle-kit": "latest",
+        "railway": "3.10.0",
         "turbo": "^2.5.0",
         "typescript": "^5.7.3",
       },
@@ -22,9 +23,6 @@
         "inngest": "^3.40.1",
       },
     },
-    "apps/infra": {
-      "name": "@technyu/infra",
-    },
     "apps/room-worker": {
       "name": "@technyu/room-worker",
       "dependencies": {
@@ -34,9 +32,6 @@
         "@technyu/workflows": "workspace:*",
         "inngest": "^3.40.1",
       },
-    },
-    "apps/tunnel": {
-      "name": "@technyu/tunnel",
     },
     "apps/web": {
       "name": "@technyu/web",
@@ -53,13 +48,6 @@
         "@types/react-dom": "^19.1.7",
         "@vitejs/plugin-react": "^5.0.2",
         "vite": "^7.1.3",
-      },
-    },
-    "apps/worker": {
-      "name": "@technyu/worker",
-      "dependencies": {
-        "@technyu/adapters": "workspace:*",
-        "@technyu/db": "workspace:*",
       },
     },
     "packages/adapters": {
@@ -210,6 +198,8 @@
     "@fullcalendar/react": ["@fullcalendar/react@6.1.21", "", { "peerDependencies": { "@fullcalendar/core": "~6.1.21", "react": "^16.7.0 || ^17 || ^18 || ^19", "react-dom": "^16.7.0 || ^17 || ^18 || ^19" } }, "sha512-TLpmGUd5k/PMdCh8XbeFC9PW9wuGvMms1oCxWgXyjK3EFPXAAd0PLfcvwKdyxoAS5eK1E4RJFkjMHvsYHpimcg=="],
 
     "@fullcalendar/timegrid": ["@fullcalendar/timegrid@6.1.21", "", { "dependencies": { "@fullcalendar/daygrid": "~6.1.21" }, "peerDependencies": { "@fullcalendar/core": "~6.1.21" } }, "sha512-2DnShx/jallGmb8QCkr6pAOu/zuPhJrP7+uTrAtSnbqsX7GF3lTxqSeNGkTQwsgF5g/ia8udhQ+JNYaE+TN1cQ=="],
+
+    "@graphql-typed-document-node/core": ["@graphql-typed-document-node/core@3.2.0", "", { "peerDependencies": { "graphql": "^0.8.0 || ^0.9.0 || ^0.10.0 || ^0.11.0 || ^0.12.0 || ^0.13.0 || ^14.0.0 || ^15.0.0 || ^16.0.0 || ^17.0.0" } }, "sha512-mB9oAsNCm9aM3/SOv4YtBMqZbYj10R7dkq8byBqxGY/ncFwhf2oQzMV+LCRlWoDSEBJ3COiR1yeDvMtsoOsuFQ=="],
 
     "@grpc/grpc-js": ["@grpc/grpc-js@1.14.4", "", { "dependencies": { "@grpc/proto-loader": "^0.8.0", "@js-sdsl/ordered-map": "^4.4.2" } }, "sha512-k9Dj3DV/itK9D06Y8f190Qgop7/Ui+D0njFV3LHMPwPT75DpXLQohE9Wmz0QElrJnzsjB7KPWiKJbOl7IPDArQ=="],
 
@@ -479,15 +469,9 @@
 
     "@technyu/db": ["@technyu/db@workspace:packages/db"],
 
-    "@technyu/infra": ["@technyu/infra@workspace:apps/infra"],
-
     "@technyu/room-worker": ["@technyu/room-worker@workspace:apps/room-worker"],
 
-    "@technyu/tunnel": ["@technyu/tunnel@workspace:apps/tunnel"],
-
     "@technyu/web": ["@technyu/web@workspace:apps/web"],
-
-    "@technyu/worker": ["@technyu/worker@workspace:apps/worker"],
 
     "@technyu/workflows": ["@technyu/workflows@workspace:packages/workflows"],
 
@@ -647,6 +631,8 @@
 
     "google-logging-utils": ["google-logging-utils@1.1.3", "", {}, "sha512-eAmLkjDjAFCVXg7A1unxHsLf961m6y17QFqXqAXGj/gVkKFrEICfStRfwUlGNfeCEjNRa32JEWOUTlYXPyyKvA=="],
 
+    "graphql": ["graphql@16.14.2", "", {}, "sha512-Chq1s4CY7jmh8gO2qvLIJyfCDIN+EHLFW/9iShnp1z8FjBQMoodWP1kDC36VAMXXIvAjj4ARa7ntfAV2BrjsbA=="],
+
     "has-flag": ["has-flag@4.0.0", "", {}, "sha512-EykJT/Q1KjTWctppgIAgfSO0tKVuZUjhgMr17kqTumMl6Afv3EISleU7qZUzoXDFTAHTDC4NOoG/ZxU3EvlMPQ=="],
 
     "hash.js": ["hash.js@1.1.7", "", { "dependencies": { "inherits": "^2.0.3", "minimalistic-assert": "^1.0.1" } }, "sha512-taOaskGt4z4SOANNseOviYDvjEJinIkRgmp7LbKP2YTTmVxWBl87s/uzK9r+44BclBSp2X7K1hqeNfz9JbBeXA=="],
@@ -740,6 +726,8 @@
     "preact": ["preact@10.12.1", "", {}, "sha512-l8386ixSsBdbreOAkqtrwqHwdvR35ID8c3rKPa8lCWuO86dBi32QWHV4vfsZK1utLLFMvw+Z5Ad4XLkZzchscg=="],
 
     "protobufjs": ["protobufjs@7.6.5", "", { "dependencies": { "@protobufjs/aspromise": "^1.1.2", "@protobufjs/base64": "^1.1.2", "@protobufjs/codegen": "^2.0.5", "@protobufjs/eventemitter": "^1.1.1", "@protobufjs/fetch": "^1.1.1", "@protobufjs/float": "^1.0.2", "@protobufjs/path": "^1.1.2", "@protobufjs/pool": "^1.1.0", "@protobufjs/utf8": "^1.1.1", "@types/node": ">=13.7.0", "long": "^5.3.2" } }, "sha512-/FPD0nUc9jH6rfFjji9IBqOz4pcSE3CsT1m7Ep6Mdb0LxSUMj8hgl6GomOvZzpNpAqqGaXA0P3VSrZLFzIhQrw=="],
+
+    "railway": ["railway@3.10.0", "", { "dependencies": { "@graphql-typed-document-node/core": "^3.2.0", "graphql": "^16.10.0", "tsx": "^4.20.0" }, "bin": { "railway-iac-ts": "dist/iac/bin.js" } }, "sha512-yQtWGFkeGpIdyfwiQQOkWHLfXvSQH7gW6kz83nlre+ZeH9J1J8vX03pzL4zseTLbLKx2AhWs/e/6lZPASGogEw=="],
 
     "react": ["react@19.2.8", "", {}, "sha512-PWaYA1L/q9u2u7xYQi+Y3L3Yfnie7XyLeaJICV1MGD6LprsBxcAqGjYyr0eY3p+QdsA+x/Irkt4Qif8D63+Sbw=="],
 
