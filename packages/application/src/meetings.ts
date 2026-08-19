@@ -1,4 +1,4 @@
-import { email, id, type ClientInvocation, type Meeting, type MeetingParticipant } from "@technyu/core";
+import { email, id, type ActorContext, type Meeting, type MeetingParticipant, type NotificationEndpointId } from "@technyu/core";
 import { z } from "zod";
 import type { CoordinatorRepository, PendingOutboxEvent } from "./ports.ts";
 
@@ -15,15 +15,14 @@ export type DirectMeetingInput = z.infer<typeof directMeetingInputSchema>;
 
 export async function startDirectMeeting(
   repository: CoordinatorRepository,
-  invocation: ClientInvocation,
+  actor: ActorContext,
   input: DirectMeetingInput,
+  statusAnnouncementEndpointId?: NotificationEndpointId,
 ): Promise<Meeting> {
-  if (!invocation.organizationId) throw new Error("Run /setup before creating meetings.");
-  if (!invocation.userId) throw new Error("Unable to resolve the current user.");
   if (input.startsAt <= new Date()) throw new Error("Meeting start time must be in the future.");
   const endsAt = new Date(input.startsAt.getTime() + input.durationMinutes * 60_000);
   return repository.createDirectMeeting({
-    organizationId: invocation.organizationId,
+    organizationId: actor.organizationId,
     mode: "direct",
     status: "awaiting_confirmation",
     title: input.title,
@@ -31,8 +30,9 @@ export async function startDirectMeeting(
     time: { startsAt: input.startsAt, endsAt },
     location: input.location || undefined,
     notes: input.notes || undefined,
-    createdBy: invocation.userId,
-    notificationTarget: { client: "discord", channelId: invocation.channelId },
+    createdByPersonId: actor.personId,
+    initiatedViaIntegrationId: actor.integrationId,
+    statusAnnouncementEndpointId,
   });
 }
 
@@ -48,12 +48,12 @@ export function buildExternalParticipants(meetingId: string, values: Array<{ nam
 
 export async function confirmMeeting(
   repository: CoordinatorRepository,
-  invocation: ClientInvocation,
+  actor: ActorContext,
   meetingId: string,
 ): Promise<PendingOutboxEvent[]> {
   const meeting = await repository.getMeetingForConfirmation(meetingId);
-  if (!meeting || meeting.organizationId !== invocation.organizationId) throw new Error("Meeting not found.");
-  if (meeting.createdBy !== invocation.userId) throw new Error("Only the meeting creator can confirm it.");
+  if (!meeting || meeting.organizationId !== actor.organizationId) throw new Error("Meeting not found.");
+  if (meeting.createdByPersonId !== actor.personId) throw new Error("Only the meeting creator can confirm it.");
   if (meeting.status !== "awaiting_confirmation") throw new Error("This meeting cannot be confirmed now.");
   const outbox = await repository.markCalendarPending(meetingId, meeting.version);
   if (!outbox) throw new Error("The meeting changed. Please reopen it.");

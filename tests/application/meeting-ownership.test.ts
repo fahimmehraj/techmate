@@ -3,8 +3,9 @@ import { confirmMeeting, startDirectMeeting } from "../../packages/application/s
 import type { CoordinatorRepository } from "../../packages/application/src/ports.ts";
 
 const organizationId = "org-1" as never;
-const creatorId = "user-creator" as never;
-const otherUserId = "user-other" as never;
+const creatorId = "person-creator" as never;
+const otherUserId = "person-other" as never;
+const integrationId = "integration-discord" as never;
 const meeting = {
   id: "meeting-1" as never,
   organizationId,
@@ -13,21 +14,18 @@ const meeting = {
   title: "Planning",
   timeZone: "America/New_York",
   time: { startsAt: new Date("2027-01-08T18:00:00Z"), endsAt: new Date("2027-01-08T19:00:00Z") },
-  createdBy: creatorId,
-  notificationTarget: { client: "discord" as const, channelId: "channel-1" },
+  createdByPersonId: creatorId,
+  initiatedViaIntegrationId: integrationId,
   version: 1,
 };
 
-function invocation(userId: typeof creatorId | typeof otherUserId) {
+function invocation(personId: typeof creatorId | typeof otherUserId) {
   return {
     idempotencyKey: "interaction-1",
-    client: "discord" as const,
     organizationId,
-    discordUserId: userId as string,
-    discordRoleIds: [],
-    isAdministrator: true,
-    channelId: "channel-1",
-    userId,
+    integrationId,
+    personId,
+    capabilities: new Set(["organization:admin" as const]),
   };
 }
 
@@ -48,7 +46,7 @@ describe("meeting ownership", () => {
       timezone: "America/New_York",
     });
 
-    expect((saved as { createdBy: unknown }).createdBy).toBe(otherUserId);
+    expect((saved as { createdByPersonId: unknown }).createdByPersonId).toBe(otherUserId);
   });
 
   test("does not let even a Discord Administrator confirm someone else's meeting", async () => {

@@ -1,5 +1,5 @@
 import { and, eq, inArray, isNull, sql as drizzleSql } from "drizzle-orm";
-import { id, type AvailabilityCalendarConnection, type CandidateSlot, type ClientAudienceReference, type ClientInvocation, type Meeting, type MeetingParticipant, type MeetingPlanningSession, type OrganizationProviderInstallation, type OrganizationSetupState, type OrganizerCalendarConnection, type PlanningAttendee, type RoomBooking, type RoomCandidate, type Task, type TaskAssignment, type TaskReminderPolicy, type Team } from "@technyu/core";
+import { id, type ActorContext, type AudienceReference, type AvailabilityCalendarConnection, type CandidateSlot, type Meeting, type MeetingParticipant, type MeetingPlanningSession, type NotificationEndpoint, type OrganizationProviderInstallation, type OrganizationSetupState, type OrganizerCalendarConnection, type PlanningAttendee, type RoomBooking, type RoomCandidate, type Task, type TaskAssignment, type TaskReminderPolicy, type Team } from "@technyu/core";
 import { validatePlanningTime, type CoordinatorRepository, type CreateDirectMeetingRecord, type PendingOutboxEvent } from "@technyu/application";
 import { db } from "./client.ts";
 import {
@@ -19,7 +19,11 @@ import {
   organizationPeople,
   oauthStates,
   outboxEvents,
+  notificationEndpoints,
+  personNotificationEndpointBindings,
   planningAttendees,
+  planningAudienceSelectionPeople,
+  planningAudienceSelections,
   planningBrowserSessions,
   planningLaunchTokens,
   planningSessions,
@@ -48,25 +52,27 @@ const asMeeting = (row: typeof meetings.$inferSelect): Meeting => ({
   discoveryWindow: row.discoveryStartsAt && row.discoveryEndsAt ? { startsAt: row.discoveryStartsAt, endsAt: row.discoveryEndsAt } : undefined,
   location: row.location ?? undefined,
   notes: row.notes ?? undefined,
-  createdBy: id<"UserId">(row.createdByUserId),
-  notificationTarget: { client: row.notificationClient as "discord", channelId: row.notificationChannelId },
+  createdByPersonId: id<"OrganizationPersonId">(requiredGeneric(row.createdByPersonId, "meeting", row.id)),
+  initiatedViaIntegrationId: id<"OrganizationClientIntegrationId">(requiredGeneric(row.initiatedViaIntegrationId, "meeting", row.id)),
+  statusAnnouncementEndpointId: row.statusAnnouncementEndpointId ? id<"NotificationEndpointId">(row.statusAnnouncementEndpointId) : undefined,
   version: row.version,
 });
 
 const asProviderInstallation = (row: typeof providerInstallations.$inferSelect): OrganizationProviderInstallation => ({
   id: id<"ProviderInstallationId">(row.id), organizationId: id<"OrganizationId">(row.organizationId), providerId: row.providerId,
-  status: row.status, values: row.values, configuredBy: id<"UserId">(row.configuredByUserId),
+  status: row.status, values: row.values, configuredByPersonId: id<"OrganizationPersonId">(requiredGeneric(row.configuredByPersonId, "provider installation", row.id)),
 });
 const asRoomBooking = (row: typeof roomBookings.$inferSelect): RoomBooking => ({
   id: id<"RoomBookingId">(row.id), organizationId: id<"OrganizationId">(row.organizationId), meetingId: id<"MeetingId">(row.meetingId),
-  providerInstallationId: id<"ProviderInstallationId">(row.providerInstallationId), createdBy: id<"UserId">(row.createdByUserId), status: row.status,
+  providerInstallationId: id<"ProviderInstallationId">(row.providerInstallationId), createdByPersonId: id<"OrganizationPersonId">(requiredGeneric(row.createdByPersonId, "room booking", row.id)), status: row.status,
   room: row.room as unknown as RoomCandidate | undefined, providerReference: row.providerReference ?? undefined, failureReason: row.failureReason ?? undefined,
 });
 
 const asPlanningSession = (row: typeof planningSessions.$inferSelect): MeetingPlanningSession => ({
-  id: id<"PlanningSessionId">(row.id), organizationId: id<"OrganizationId">(row.organizationId), createdBy: id<"UserId">(row.createdByUserId),
+  id: id<"PlanningSessionId">(row.id), organizationId: id<"OrganizationId">(row.organizationId), createdByPersonId: id<"OrganizationPersonId">(requiredGeneric(row.createdByPersonId, "planning session", row.id)),
+  initiatedViaIntegrationId: id<"OrganizationClientIntegrationId">(requiredGeneric(row.initiatedViaIntegrationId, "planning session", row.id)),
   kind: row.kind, sourceMeetingId: row.sourceMeetingId ? id<"MeetingId">(row.sourceMeetingId) : undefined,
-  notificationTarget: { client: row.notificationClient as "discord", channelId: row.notificationChannelId }, status: row.status,
+  statusAnnouncementEndpointId: row.statusAnnouncementEndpointId ? id<"NotificationEndpointId">(row.statusAnnouncementEndpointId) : undefined, status: row.status,
   title: row.title ?? undefined,
   selectedTime: row.selectedStartsAt && row.selectedEndsAt ? { startsAt: row.selectedStartsAt, endsAt: row.selectedEndsAt } : undefined,
   availabilityOverride: Boolean(row.availabilityOverride), expiresAt: row.expiresAt,
@@ -74,8 +80,8 @@ const asPlanningSession = (row: typeof planningSessions.$inferSelect): MeetingPl
 
 const asPlanningAttendee = (row: typeof planningAttendees.$inferSelect): PlanningAttendee => ({
   id: id<"PlanningAttendeeId">(row.id), planningSessionId: id<"PlanningSessionId">(row.planningSessionId),
-  userId: row.userId ? id<"UserId">(row.userId) : undefined, memberId: row.memberId ? id<"MemberId">(row.memberId) : undefined,
-  displayName: row.displayName, source: row.source as ClientAudienceReference, readiness: row.readiness,
+  personId: row.personId ? id<"OrganizationPersonId">(row.personId) : undefined,
+  displayName: row.displayName, source: row.source as unknown as AudienceReference, readiness: row.readiness,
 });
 
 const asTask = (row: typeof tasks.$inferSelect): Task => ({
@@ -101,6 +107,16 @@ const asTaskAssignment = (row: typeof taskAssignments.$inferSelect): TaskAssignm
   completedAt: row.completedAt ?? undefined,
 });
 
+const asNotificationEndpoint = (row: typeof notificationEndpoints.$inferSelect): NotificationEndpoint => ({
+  id: id<"NotificationEndpointId">(row.id),
+  organizationId: id<"OrganizationId">(row.organizationId),
+  integrationId: row.integrationId ? id<"OrganizationClientIntegrationId">(row.integrationId) : undefined,
+  driverId: row.driverId as NotificationEndpoint["driverId"],
+  address: row.address,
+  configuration: row.configuration,
+  status: row.status as NotificationEndpoint["status"],
+});
+
 const asTeam = (row: typeof teams.$inferSelect): Team => ({
   id: id<"TeamId">(row.id),
   organizationId: id<"OrganizationId">(row.organizationId),
@@ -121,7 +137,51 @@ function slugify(value: string) {
   return slug || "organization";
 }
 
+function requiredGeneric<T>(value: T | null, kind: string, recordId: string): T {
+  if (value === null) throw new Error(`${kind} ${recordId} has not been backfilled to the generic person model.`);
+  return value;
+}
+
 export class PostgresCoordinatorRepository implements CoordinatorRepository {
+  private async requireLegacyUserId(organizationId: string, personId: string) {
+    const legacy = await db.query.users.findFirst({ where: and(eq(users.organizationId, organizationId), eq(users.personId, personId)) });
+    if (!legacy) throw new Error("The legacy compatibility mapping for this person has not been backfilled.");
+    return legacy.id;
+  }
+
+  private async legacyAnnouncement(endpointId: string | undefined) {
+    if (!endpointId) throw new Error("Discord-originated meetings need a status announcement endpoint.");
+    const endpoint = await db.query.notificationEndpoints.findFirst({ where: eq(notificationEndpoints.id, endpointId) });
+    if (!endpoint || endpoint.driverId !== "discord.channel") throw new Error("The status announcement endpoint must be an active Discord channel.");
+    return endpoint.address;
+  }
+
+  async upsertNotificationEndpoint(input: { organizationId: string; integrationId?: string; driverId: NotificationEndpoint["driverId"]; address: string; configuration?: Record<string, unknown> }) {
+    const normalizedAddress = input.driverId === "email" ? input.address.trim().toLowerCase() : input.address;
+    const existing = await db.query.notificationEndpoints.findFirst({ where: and(
+      eq(notificationEndpoints.organizationId, input.organizationId),
+      eq(notificationEndpoints.driverId, input.driverId),
+      eq(notificationEndpoints.address, normalizedAddress),
+      input.integrationId ? eq(notificationEndpoints.integrationId, input.integrationId) : isNull(notificationEndpoints.integrationId),
+    ) });
+    const [endpoint] = existing
+      ? await db.update(notificationEndpoints).set({ configuration: input.configuration ?? existing.configuration, status: "active", updatedAt: new Date() }).where(eq(notificationEndpoints.id, existing.id)).returning()
+      : await db.insert(notificationEndpoints).values({ ...input, address: normalizedAddress, configuration: input.configuration ?? {} }).returning();
+    if (!endpoint) throw new Error("Unable to save notification endpoint.");
+    return asNotificationEndpoint(endpoint);
+  }
+
+  async bindPersonNotificationEndpoint(input: { organizationId: string; personId: string; endpointId: string; purpose: "calendar_invite" | "direct_notification" }) {
+    const rows = await db.select({ personId: organizationPeople.id, endpoint: notificationEndpoints }).from(organizationPeople)
+      .innerJoin(notificationEndpoints, eq(notificationEndpoints.id, input.endpointId))
+      .where(and(eq(organizationPeople.id, input.personId), eq(organizationPeople.organizationId, input.organizationId), eq(notificationEndpoints.organizationId, input.organizationId)));
+    const row = rows[0];
+    if (!row) throw new Error("A notification endpoint can only be bound inside its organization.");
+    if (input.purpose === "calendar_invite" && row.endpoint.driverId !== "email") throw new Error("Calendar invitations require an email endpoint.");
+    if (input.purpose === "calendar_invite") await db.delete(personNotificationEndpointBindings).where(and(eq(personNotificationEndpointBindings.personId, input.personId), eq(personNotificationEndpointBindings.purpose, input.purpose)));
+    await db.insert(personNotificationEndpointBindings).values({ personId: input.personId, endpointId: input.endpointId, purpose: input.purpose }).onConflictDoNothing();
+  }
+
   async isOrganizationOwner(organizationId: string, personId: string) {
     const row = await db.query.organizationOwners.findFirst({ where: and(eq(organizationOwners.organizationId, organizationId), eq(organizationOwners.personId, personId)) });
     return Boolean(row);
@@ -202,24 +262,18 @@ export class PostgresCoordinatorRepository implements CoordinatorRepository {
     return event ? asPendingOutboxEvent(event) : undefined;
   }
   async findOrganization(guildId: string) {
-    return db.query.organizations.findFirst({ where: eq(organizations.discordGuildId, guildId) });
+    const rows = await db.select({ organization: organizations }).from(discordIntegrationConfigs)
+      .innerJoin(organizationClientIntegrations, eq(organizationClientIntegrations.id, discordIntegrationConfigs.integrationId))
+      .innerJoin(organizations, eq(organizations.id, organizationClientIntegrations.organizationId))
+      .where(and(eq(discordIntegrationConfigs.guildId, guildId), eq(organizationClientIntegrations.status, "active")));
+    return rows[0]?.organization;
   }
 
   async setupOrganization(input: { guildId: string; name: string; discordUserId: string }) {
     return db.transaction(async (tx) => {
-      let org = await tx.query.organizations.findFirst({ where: eq(organizations.discordGuildId, input.guildId) });
-      if (!org) {
-        [org] = await tx.insert(organizations).values({ discordGuildId: input.guildId, name: input.name }).returning();
-      }
+      let org = await this.findOrganization(input.guildId);
+      if (!org) [org] = await tx.insert(organizations).values({ name: input.name, discordGuildId: input.guildId }).returning();
       if (!org) throw new Error("Unable to create organization.");
-      const existing = await tx.select({ user: users }).from(users).innerJoin(clientIdentities, eq(clientIdentities.userId, users.id))
-        .where(and(eq(users.organizationId, org.id), eq(clientIdentities.client, "discord"), eq(clientIdentities.subjectId, input.discordUserId)));
-      let user = existing[0]?.user;
-      if (!user) {
-        [user] = await tx.insert(users).values({ organizationId: org.id }).returning();
-        if (user) await tx.insert(clientIdentities).values({ userId: user.id, client: "discord", subjectId: input.discordUserId });
-      }
-      if (!user) throw new Error("Unable to create setup user.");
       let discordIntegration = (await tx.select({ integration: organizationClientIntegrations }).from(discordIntegrationConfigs)
         .innerJoin(organizationClientIntegrations, eq(organizationClientIntegrations.id, discordIntegrationConfigs.integrationId))
         .where(eq(discordIntegrationConfigs.guildId, input.guildId)))[0]?.integration;
@@ -239,9 +293,24 @@ export class PostgresCoordinatorRepository implements CoordinatorRepository {
         if (!person) throw new Error("Unable to create organization person.");
         await tx.insert(integrationIdentities).values({ integrationId: discordIntegration.id, personId: person.id, externalSubjectId: input.discordUserId });
       }
+      const existingDmEndpoint = await tx.query.notificationEndpoints.findFirst({ where: and(eq(notificationEndpoints.organizationId, org.id), eq(notificationEndpoints.integrationId, discordIntegration.id), eq(notificationEndpoints.driverId, "discord.dm"), eq(notificationEndpoints.address, input.discordUserId)) });
+      const [dmEndpoint] = existingDmEndpoint
+        ? await tx.update(notificationEndpoints).set({ status: "active", updatedAt: new Date() }).where(eq(notificationEndpoints.id, existingDmEndpoint.id)).returning()
+        : await tx.insert(notificationEndpoints).values({ organizationId: org.id, integrationId: discordIntegration.id, driverId: "discord.dm", address: input.discordUserId, configuration: {} }).returning();
+      if (dmEndpoint) await tx.insert(personNotificationEndpointBindings).values({ personId: person.id, endpointId: dmEndpoint.id, purpose: "direct_notification" }).onConflictDoNothing();
+      // Compatibility shadow: callers running before the reviewed cutover can
+      // still resolve their legacy user record, while all domain writes use personId.
+      let legacyUser = (await tx.select({ user: users }).from(users).innerJoin(clientIdentities, eq(clientIdentities.userId, users.id))
+        .where(and(eq(users.organizationId, org.id), eq(clientIdentities.client, "discord"), eq(clientIdentities.subjectId, input.discordUserId))))[0]?.user;
+      if (!legacyUser) {
+        [legacyUser] = await tx.insert(users).values({ organizationId: org.id, personId: person.id }).returning();
+        if (legacyUser) await tx.insert(clientIdentities).values({ userId: legacyUser.id, client: "discord", subjectId: input.discordUserId });
+      } else if (legacyUser.personId !== person.id) {
+        [legacyUser] = await tx.update(users).set({ personId: person.id }).where(eq(users.id, legacyUser.id)).returning();
+      }
       const owners = await tx.select().from(organizationOwners).where(eq(organizationOwners.organizationId, org.id));
       if (!owners.length) await tx.insert(organizationOwners).values({ organizationId: org.id, personId: person.id, grantedByPersonId: person.id });
-      return { org, user };
+      return { org, person, integration: discordIntegration, legacyUser };
     });
   }
 
@@ -264,20 +333,13 @@ export class PostgresCoordinatorRepository implements CoordinatorRepository {
     };
   }
 
-  async resolveInvocation(input: Omit<ClientInvocation, "organizationId" | "userId">): Promise<ClientInvocation> {
-    if (!input.discordGuildId) return input;
-    const org = await this.findOrganization(input.discordGuildId);
-    if (!org) return { ...input, organizationId: undefined, userId: undefined };
-    const existing = await db.select({ user: users }).from(users).innerJoin(clientIdentities, eq(clientIdentities.userId, users.id))
-      .where(and(eq(users.organizationId, org.id), eq(clientIdentities.client, "discord"), eq(clientIdentities.subjectId, input.discordUserId)));
-    let user = existing[0]?.user;
-    if (!user) {
-      [user] = await db.insert(users).values({ organizationId: org.id }).returning();
-      if (user) await db.insert(clientIdentities).values({ userId: user.id, client: "discord", subjectId: input.discordUserId });
-    }
+  async resolveDiscordActor(input: { guildId?: string; discordUserId: string; idempotencyKey: string; isAdministrator: boolean }): Promise<ActorContext | undefined> {
+    if (!input.guildId) return undefined;
+    const org = await this.findOrganization(input.guildId);
+    if (!org) return undefined;
     const integration = (await db.select({ integration: organizationClientIntegrations }).from(discordIntegrationConfigs)
       .innerJoin(organizationClientIntegrations, eq(organizationClientIntegrations.id, discordIntegrationConfigs.integrationId))
-      .where(eq(discordIntegrationConfigs.guildId, input.discordGuildId)))[0]?.integration;
+      .where(eq(discordIntegrationConfigs.guildId, input.guildId)))[0]?.integration;
     let person = integration ? (await db.select({ person: organizationPeople }).from(integrationIdentities)
       .innerJoin(organizationPeople, eq(organizationPeople.id, integrationIdentities.personId))
       .where(and(eq(integrationIdentities.integrationId, integration.id), eq(integrationIdentities.externalSubjectId, input.discordUserId))))[0]?.person : undefined;
@@ -285,12 +347,20 @@ export class PostgresCoordinatorRepository implements CoordinatorRepository {
       [person] = await db.insert(organizationPeople).values({ organizationId: org.id, displayName: input.discordUserId }).returning();
       if (person) await db.insert(integrationIdentities).values({ integrationId: integration.id, personId: person.id, externalSubjectId: input.discordUserId });
     }
+    if (!integration || !person) return undefined;
+    const legacyUser = await db.query.users.findFirst({ where: and(eq(users.organizationId, org.id), eq(users.personId, person.id)) });
+    if (!legacyUser) {
+      const [createdUser] = await db.insert(users).values({ organizationId: org.id, personId: person.id }).returning();
+      if (createdUser) await db.insert(clientIdentities).values({ userId: createdUser.id, client: "discord", subjectId: input.discordUserId }).onConflictDoNothing();
+    }
+    const dmEndpoint = await this.upsertNotificationEndpoint({ organizationId: org.id, integrationId: integration.id, driverId: "discord.dm", address: input.discordUserId });
+    await this.bindPersonNotificationEndpoint({ organizationId: org.id, personId: person.id, endpointId: dmEndpoint.id, purpose: "direct_notification" });
     return {
-      ...input,
+      idempotencyKey: input.idempotencyKey,
       organizationId: id<"OrganizationId">(org.id),
-      userId: id<"UserId">(user!.id),
-      integrationId: integration ? id<"OrganizationClientIntegrationId">(integration.id) : undefined,
-      personId: person ? id<"OrganizationPersonId">(person.id) : undefined,
+      integrationId: id<"OrganizationClientIntegrationId">(integration.id),
+      personId: id<"OrganizationPersonId">(person.id),
+      capabilities: input.isAdministrator ? new Set(["organization:admin" as const]) : new Set<"organization:admin">(),
     };
   }
 
@@ -389,19 +459,19 @@ export class PostgresCoordinatorRepository implements CoordinatorRepository {
   async createOauthState(input: {
     state: string;
     organizationId: string;
-    userId: string;
-    memberId?: string;
+    personId: string;
     kind: "organizer" | "availability";
     codeVerifier: string;
   }) {
-    if ((input.kind === "availability") !== Boolean(input.memberId)) {
-      throw new Error("Availability authorization must be attached to a registered member.");
-    }
+    const legacyUser = await db.query.users.findFirst({ where: and(eq(users.organizationId, input.organizationId), eq(users.personId, input.personId)) });
+    if (!legacyUser) throw new Error("The legacy compatibility mapping for this person has not been backfilled.");
+    if (input.kind === "availability" && !legacyUser.memberId) throw new Error("Availability authorization requires a Calendar-invite email endpoint.");
     await db.insert(oauthStates).values({
       state: input.state,
       organizationId: input.organizationId,
-      userId: input.userId,
-      memberId: input.memberId,
+      userId: legacyUser.id,
+      memberId: input.kind === "availability" ? legacyUser.memberId : null,
+      personId: input.personId,
       kind: input.kind,
       codeVerifier: input.codeVerifier,
       expiresAt: new Date(Date.now() + 10 * 60_000),
@@ -414,7 +484,7 @@ export class PostgresCoordinatorRepository implements CoordinatorRepository {
     return row;
   }
 
-  async setOrganizerConnection(input: { organizationId: string; accountEmail: string; encryptedRefreshToken: string }) {
+  async setOrganizerConnection(input: { organizationId: string; authorizedByPersonId: string; accountEmail: string; encryptedRefreshToken: string }) {
     return db.transaction(async (tx) => {
       const existing = await tx.query.calendarConnections.findFirst({
         where: and(eq(calendarConnections.organizationId, input.organizationId), eq(calendarConnections.kind, "organizer")),
@@ -425,10 +495,12 @@ export class PostgresCoordinatorRepository implements CoordinatorRepository {
             accountEmail: input.accountEmail,
             encryptedRefreshToken: input.encryptedRefreshToken,
             status: "active",
+            authorizedByPersonId: input.authorizedByPersonId,
             updatedAt: new Date(),
           }).where(eq(calendarConnections.id, existing.id)).returning()
         : await tx.insert(calendarConnections).values({
             organizationId: input.organizationId,
+            authorizedByPersonId: input.authorizedByPersonId,
             kind: "organizer",
             calendarId: "primary",
             accountEmail: input.accountEmail,
@@ -439,74 +511,89 @@ export class PostgresCoordinatorRepository implements CoordinatorRepository {
     });
   }
 
-  async getMemberForUser(userId: string) {
-    const user = await db.query.users.findFirst({ where: eq(users.id, userId) });
-    if (!user?.memberId) return undefined;
-    return db.query.members.findFirst({ where: eq(members.id, user.memberId) });
-  }
-
-  async getProfile(userId: string) {
-    const member = await this.getMemberForUser(userId);
-    if (!member) return { member: undefined, availability: undefined };
+  async getPersonProfile(personId: string) {
+    const rows = await db.select({ person: organizationPeople, endpoint: notificationEndpoints }).from(organizationPeople)
+      .leftJoin(personNotificationEndpointBindings, and(eq(personNotificationEndpointBindings.personId, organizationPeople.id), eq(personNotificationEndpointBindings.purpose, "calendar_invite")))
+      .leftJoin(notificationEndpoints, eq(notificationEndpoints.id, personNotificationEndpointBindings.endpointId))
+      .where(eq(organizationPeople.id, personId));
+    const row = rows[0];
+    if (!row) return undefined;
     const availability = await db.query.calendarConnections.findFirst({
-      where: and(
-        eq(calendarConnections.kind, "availability"),
-        eq(calendarConnections.memberId, member.id),
-        eq(calendarConnections.status, "active"),
-      ),
+      where: and(eq(calendarConnections.kind, "availability"), eq(calendarConnections.personId, personId), eq(calendarConnections.status, "active")),
     });
-    return { member, availability };
+    return { person: row.person, calendarInviteEndpoint: row.endpoint ?? undefined, availability };
   }
 
-  async upsertAvailabilityConnection(input: {
-    organizationId: string;
-    memberId: string;
-    accountEmail: string;
-    encryptedRefreshToken: string;
-  }) {
+  async registerPersonProfile(input: { organizationId: string; personId: string; displayName: string; inviteEmail: string }) {
     return db.transaction(async (tx) => {
-      const member = await tx.query.members.findFirst({
-        where: and(eq(members.id, input.memberId), eq(members.organizationId, input.organizationId)),
-      });
-      if (!member) throw new Error("The member for this availability connection no longer exists.");
-      const existing = await tx.query.calendarConnections.findFirst({
-        where: and(eq(calendarConnections.kind, "availability"), eq(calendarConnections.memberId, input.memberId)),
-      });
+      const person = await tx.query.organizationPeople.findFirst({ where: and(eq(organizationPeople.id, input.personId), eq(organizationPeople.organizationId, input.organizationId)) });
+      if (!person) throw new Error("The current person was not found.");
+      const normalizedEmail = input.inviteEmail.trim().toLowerCase();
+      const existingBinding = await tx.select({ binding: personNotificationEndpointBindings, endpoint: notificationEndpoints }).from(personNotificationEndpointBindings)
+        .innerJoin(notificationEndpoints, eq(notificationEndpoints.id, personNotificationEndpointBindings.endpointId))
+        .where(and(eq(personNotificationEndpointBindings.purpose, "calendar_invite"), eq(notificationEndpoints.organizationId, input.organizationId), eq(notificationEndpoints.driverId, "email"), eq(notificationEndpoints.address, normalizedEmail)));
+      if (existingBinding.some((row) => row.binding.personId !== input.personId)) throw new Error("That invite email already belongs to another registered person.");
+      const currentEndpoint = await tx.query.notificationEndpoints.findFirst({ where: and(eq(notificationEndpoints.organizationId, input.organizationId), eq(notificationEndpoints.driverId, "email"), eq(notificationEndpoints.address, normalizedEmail), isNull(notificationEndpoints.integrationId)) });
+      const [endpoint] = currentEndpoint
+        ? await tx.update(notificationEndpoints).set({ status: "active", updatedAt: new Date() }).where(eq(notificationEndpoints.id, currentEndpoint.id)).returning()
+        : await tx.insert(notificationEndpoints).values({ organizationId: input.organizationId, driverId: "email", address: normalizedEmail, configuration: {} }).returning();
+      if (!endpoint) throw new Error("Unable to save the Calendar-invite endpoint.");
+      await tx.delete(personNotificationEndpointBindings).where(and(eq(personNotificationEndpointBindings.personId, input.personId), eq(personNotificationEndpointBindings.purpose, "calendar_invite")));
+      await tx.insert(personNotificationEndpointBindings).values({ personId: input.personId, endpointId: endpoint.id, purpose: "calendar_invite" }).onConflictDoNothing();
+      const [updatedPerson] = await tx.update(organizationPeople).set({ displayName: input.displayName.trim(), invitationEmail: normalizedEmail, status: "active", updatedAt: new Date() }).where(eq(organizationPeople.id, input.personId)).returning();
+      if (!updatedPerson) throw new Error("Unable to update profile.");
+      // Keep the legacy profile projection synchronized until cutover. This is
+      // deliberately a projection of the endpoint, never a second source of truth.
+      const legacyUser = await tx.query.users.findFirst({ where: and(eq(users.organizationId, input.organizationId), eq(users.personId, input.personId)) });
+      if (!legacyUser) throw new Error("The legacy compatibility mapping for this person has not been backfilled.");
+      const legacyMember = legacyUser.memberId ? await tx.query.members.findFirst({ where: eq(members.id, legacyUser.memberId) }) : undefined;
+      const [savedMember] = legacyMember
+        ? await tx.update(members).set({ displayName: updatedPerson.displayName, calendarInviteEmail: normalizedEmail, personId: input.personId, status: "active", updatedAt: new Date() }).where(eq(members.id, legacyMember.id)).returning()
+        : await tx.insert(members).values({ organizationId: input.organizationId, displayName: updatedPerson.displayName, calendarInviteEmail: normalizedEmail, personId: input.personId }).returning();
+      if (!savedMember) throw new Error("Unable to maintain the legacy profile projection.");
+      await tx.update(users).set({ memberId: savedMember.id, personId: input.personId }).where(eq(users.id, legacyUser.id));
+      const affected = await tx.select({ meetingId: meetingParticipants.meetingId, organizationId: meetings.organizationId, status: meetings.status, version: meetings.version })
+        .from(meetingParticipants).innerJoin(meetings, eq(meetings.id, meetingParticipants.meetingId))
+        .where(and(eq(meetingParticipants.personId, input.personId), inArray(meetings.status, ["awaiting_confirmation", "calendar_pending", "scheduled"]), drizzleSql`${meetings.startsAt} > now()`));
+      const affectedIds = affected.map((meeting) => meeting.meetingId);
+      if (affectedIds.length) await tx.update(meetingParticipants).set({ displayNameSnapshot: updatedPerson.displayName, calendarInviteEmailSnapshot: normalizedEmail }).where(and(eq(meetingParticipants.personId, input.personId), inArray(meetingParticipants.meetingId, affectedIds)));
+      const outboxEventsCreated: PendingOutboxEvent[] = [];
+      for (const meeting of affected.filter((value) => value.status === "scheduled")) {
+        const [resync] = await tx.update(meetings).set({ status: "calendar_pending", version: meeting.version + 1, updatedAt: new Date() })
+          .where(and(eq(meetings.id, meeting.meetingId), eq(meetings.version, meeting.version), eq(meetings.status, "scheduled"))).returning({ version: meetings.version });
+        if (!resync) continue;
+        const [outbox] = await tx.insert(outboxEvents).values({ organizationId: meeting.organizationId, type: "meeting.calendar_sync_requested", aggregateId: meeting.meetingId, expectedVersion: resync.version, payload: {} }).onConflictDoNothing().returning();
+        if (outbox) outboxEventsCreated.push(asPendingOutboxEvent(outbox));
+      }
+      return { person: updatedPerson, endpoint, outboxEvents: outboxEventsCreated };
+    });
+  }
+
+  async upsertAvailabilityConnection(input: { organizationId: string; personId: string; accountEmail: string; encryptedRefreshToken: string }) {
+    return db.transaction(async (tx) => {
+      const person = await tx.query.organizationPeople.findFirst({ where: and(eq(organizationPeople.id, input.personId), eq(organizationPeople.organizationId, input.organizationId)) });
+      if (!person) throw new Error("The person for this availability connection no longer exists.");
+      const legacyUser = await tx.query.users.findFirst({ where: and(eq(users.organizationId, input.organizationId), eq(users.personId, input.personId)) });
+      if (!legacyUser?.memberId) throw new Error("Register a Calendar-invite email before connecting availability.");
+      const existing = await tx.query.calendarConnections.findFirst({ where: and(eq(calendarConnections.kind, "availability"), eq(calendarConnections.personId, input.personId)) });
       const [connection] = existing
-        ? await tx.update(calendarConnections).set({
-            accountEmail: input.accountEmail,
-            encryptedRefreshToken: input.encryptedRefreshToken,
-            calendarId: null,
-            status: "active",
-            updatedAt: new Date(),
-          }).where(eq(calendarConnections.id, existing.id)).returning()
-        : await tx.insert(calendarConnections).values({
-            organizationId: input.organizationId,
-            memberId: input.memberId,
-            kind: "availability",
-            accountEmail: input.accountEmail,
-            encryptedRefreshToken: input.encryptedRefreshToken,
-          }).returning();
+        ? await tx.update(calendarConnections).set({ accountEmail: input.accountEmail, encryptedRefreshToken: input.encryptedRefreshToken, calendarId: null, status: "active", updatedAt: new Date() }).where(eq(calendarConnections.id, existing.id)).returning()
+        : await tx.insert(calendarConnections).values({ organizationId: input.organizationId, memberId: legacyUser.memberId, personId: input.personId, kind: "availability", accountEmail: input.accountEmail, encryptedRefreshToken: input.encryptedRefreshToken }).returning();
       if (!connection) throw new Error("Unable to save availability connection.");
       return connection;
     });
   }
 
-  async disconnectAvailability(userId: string) {
-    const member = await this.getMemberForUser(userId);
-    if (!member) throw new Error("Register your profile before managing calendar availability.");
-    const deleted = await db.delete(calendarConnections).where(and(
-      eq(calendarConnections.kind, "availability"),
-      eq(calendarConnections.memberId, member.id),
-    )).returning({ id: calendarConnections.id });
+  async disconnectAvailability(personId: string) {
+    const deleted = await db.delete(calendarConnections).where(and(eq(calendarConnections.kind, "availability"), eq(calendarConnections.personId, personId))).returning({ id: calendarConnections.id });
     return deleted.length > 0;
   }
 
-  async loadAvailabilityConnection(memberId: string): Promise<(AvailabilityCalendarConnection & { encryptedRefreshToken: string }) | undefined> {
+  async loadAvailabilityConnection(personId: string): Promise<(AvailabilityCalendarConnection & { encryptedRefreshToken: string }) | undefined> {
     const row = await db.query.calendarConnections.findFirst({
       where: and(
         eq(calendarConnections.kind, "availability"),
-        eq(calendarConnections.memberId, memberId),
+        eq(calendarConnections.personId, personId),
         eq(calendarConnections.status, "active"),
       ),
     });
@@ -514,7 +601,7 @@ export class PostgresCoordinatorRepository implements CoordinatorRepository {
     return {
       id: id<"CalendarConnectionId">(row.id),
       organizationId: id<"OrganizationId">(row.organizationId),
-      memberId: id<"MemberId">(row.memberId!),
+      personId: id<"OrganizationPersonId">(requiredGeneric(row.personId, "availability connection", row.id)),
       provider: "google_calendar",
       googleAccountEmail: row.accountEmail as AvailabilityCalendarConnection["googleAccountEmail"],
       status: row.status,
@@ -524,6 +611,10 @@ export class PostgresCoordinatorRepository implements CoordinatorRepository {
 
   async createDirectMeeting(input: CreateDirectMeetingRecord): Promise<Meeting> {
     if (!input.time) throw new Error("A direct meeting requires a start and end time.");
+    const [legacyUserId, legacyChannelId] = await Promise.all([
+      this.requireLegacyUserId(input.organizationId, input.createdByPersonId),
+      this.legacyAnnouncement(input.statusAnnouncementEndpointId),
+    ]);
     const [row] = await db.insert(meetings).values({
       organizationId: input.organizationId,
       mode: input.mode,
@@ -534,15 +625,22 @@ export class PostgresCoordinatorRepository implements CoordinatorRepository {
       endsAt: input.time.endsAt,
       location: input.location,
       notes: input.notes,
-      createdByUserId: input.createdBy,
-      notificationClient: input.notificationTarget.client,
-      notificationChannelId: input.notificationTarget.channelId,
+      createdByUserId: legacyUserId,
+      createdByPersonId: input.createdByPersonId,
+      initiatedViaIntegrationId: input.initiatedViaIntegrationId,
+      statusAnnouncementEndpointId: input.statusAnnouncementEndpointId,
+      notificationClient: "discord",
+      notificationChannelId: legacyChannelId,
     }).returning();
     if (!row) throw new Error("Unable to create meeting.");
     return asMeeting(row);
   }
 
   async createDiscoveryMeeting(input: Omit<Meeting, "id" | "version" | "time"> & { discoveryWindow: NonNullable<Meeting["discoveryWindow"]> }): Promise<Meeting> {
+    const [legacyUserId, legacyChannelId] = await Promise.all([
+      this.requireLegacyUserId(input.organizationId, input.createdByPersonId),
+      this.legacyAnnouncement(input.statusAnnouncementEndpointId),
+    ]);
     const [row] = await db.insert(meetings).values({
       organizationId: input.organizationId,
       mode: "discovery",
@@ -553,9 +651,12 @@ export class PostgresCoordinatorRepository implements CoordinatorRepository {
       discoveryEndsAt: input.discoveryWindow.endsAt,
       location: input.location,
       notes: input.notes,
-      createdByUserId: input.createdBy,
-      notificationClient: input.notificationTarget.client,
-      notificationChannelId: input.notificationTarget.channelId,
+      createdByUserId: legacyUserId,
+      createdByPersonId: input.createdByPersonId,
+      initiatedViaIntegrationId: input.initiatedViaIntegrationId,
+      statusAnnouncementEndpointId: input.statusAnnouncementEndpointId,
+      notificationClient: "discord",
+      notificationChannelId: legacyChannelId,
     }).returning();
     if (!row) throw new Error("Unable to create availability discovery.");
     return asMeeting(row);
@@ -608,7 +709,7 @@ export class PostgresCoordinatorRepository implements CoordinatorRepository {
   async addParticipant(input: MeetingParticipant): Promise<void> {
     await db.insert(meetingParticipants).values({
       meetingId: input.meetingId,
-      memberId: input.memberId,
+      personId: input.personId,
       kind: input.kind,
       displayNameSnapshot: input.displayNameSnapshot,
       calendarInviteEmailSnapshot: input.calendarInviteEmailSnapshot,
@@ -663,26 +764,29 @@ export class PostgresCoordinatorRepository implements CoordinatorRepository {
     return row ? asProviderInstallation(row) : undefined;
   }
 
-  async saveProviderInstallation(input: { organizationId: string; providerId: string; values: Record<string, string>; status: "configuring" | "enabled" | "disabled"; configuredBy: string }) {
+  async saveProviderInstallation(input: { organizationId: string; providerId: string; values: Record<string, string>; status: "configuring" | "enabled" | "disabled"; configuredByPersonId: string }) {
+    const legacyUserId = await this.requireLegacyUserId(input.organizationId, input.configuredByPersonId);
     const existing = await this.getProviderInstallation(input.organizationId, input.providerId);
     const [row] = existing
-      ? await db.update(providerInstallations).set({ values: input.values, status: input.status, configuredByUserId: input.configuredBy, updatedAt: new Date() }).where(eq(providerInstallations.id, existing.id)).returning()
-      : await db.insert(providerInstallations).values({ organizationId: input.organizationId, providerId: input.providerId, values: input.values, status: input.status, configuredByUserId: input.configuredBy }).returning();
+      ? await db.update(providerInstallations).set({ values: input.values, status: input.status, configuredByPersonId: input.configuredByPersonId, configuredByUserId: legacyUserId, updatedAt: new Date() }).where(eq(providerInstallations.id, existing.id)).returning()
+      : await db.insert(providerInstallations).values({ organizationId: input.organizationId, providerId: input.providerId, values: input.values, status: input.status, configuredByPersonId: input.configuredByPersonId, configuredByUserId: legacyUserId }).returning();
     if (!row) throw new Error("Unable to save provider installation.");
     return asProviderInstallation(row);
   }
 
-  async disableProviderInstallation(organizationId: string, providerId: string, configuredBy: string) {
-    const [row] = await db.update(providerInstallations).set({ status: "disabled", configuredByUserId: configuredBy, updatedAt: new Date() })
+  async disableProviderInstallation(organizationId: string, providerId: string, configuredByPersonId: string) {
+    const legacyUserId = await this.requireLegacyUserId(organizationId, configuredByPersonId);
+    const [row] = await db.update(providerInstallations).set({ status: "disabled", configuredByPersonId, configuredByUserId: legacyUserId, updatedAt: new Date() })
       .where(and(eq(providerInstallations.organizationId, organizationId), eq(providerInstallations.providerId, providerId))).returning();
     return row ? asProviderInstallation(row) : undefined;
   }
 
-  async createRoomBooking(input: { meetingId: string; providerInstallationId: string; createdBy: string }) {
+  async createRoomBooking(input: { meetingId: string; providerInstallationId: string; createdByPersonId: string }) {
     return db.transaction(async (tx) => {
       const meeting = await tx.query.meetings.findFirst({ where: eq(meetings.id, input.meetingId) });
       if (!meeting?.startsAt || !meeting.endsAt || meeting.status !== "scheduled") throw new Error("Schedule the meeting before finding a room.");
-      const [booking] = await tx.insert(roomBookings).values({ organizationId: meeting.organizationId, meetingId: input.meetingId, providerInstallationId: input.providerInstallationId, createdByUserId: input.createdBy }).returning();
+      const legacyUserId = await this.requireLegacyUserId(meeting.organizationId, input.createdByPersonId);
+      const [booking] = await tx.insert(roomBookings).values({ organizationId: meeting.organizationId, meetingId: input.meetingId, providerInstallationId: input.providerInstallationId, createdByPersonId: input.createdByPersonId, createdByUserId: legacyUserId }).returning();
       if (!booking) throw new Error("Unable to create room booking.");
       const [outbox] = await tx.insert(outboxEvents).values({ organizationId: meeting.organizationId, type: "room.discovery_requested", aggregateId: booking.id, payload: {} }).onConflictDoNothing().returning();
       return { ...asRoomBooking(booking), outboxEvents: outbox ? [asPendingOutboxEvent(outbox)] : [] };
@@ -713,17 +817,17 @@ export class PostgresCoordinatorRepository implements CoordinatorRepository {
     return row ? asRoomBooking(row) : undefined;
   }
 
-  async selectRoomBookingCandidate(input: { roomBookingId: string; userId: string; room: RoomCandidate }) {
+  async selectRoomBookingCandidate(input: { roomBookingId: string; personId: string; room: RoomCandidate }) {
     const [row] = await db.update(roomBookings).set({ room: input.room as unknown as Record<string, unknown>, updatedAt: new Date() })
-      .where(and(eq(roomBookings.id, input.roomBookingId), eq(roomBookings.createdByUserId, input.userId), eq(roomBookings.status, "awaiting_confirmation"))).returning();
+      .where(and(eq(roomBookings.id, input.roomBookingId), eq(roomBookings.createdByPersonId, input.personId), eq(roomBookings.status, "awaiting_confirmation"))).returning();
     if (!row) throw new Error("Only the room-flow creator can select a pending room.");
     return asRoomBooking(row);
   }
 
-  async submitRoomBooking(roomBookingId: string, userId: string) {
+  async submitRoomBooking(roomBookingId: string, personId: string) {
     return db.transaction(async (tx) => {
       const [booking] = await tx.update(roomBookings).set({ status: "submitting", updatedAt: new Date() })
-        .where(and(eq(roomBookings.id, roomBookingId), eq(roomBookings.createdByUserId, userId), eq(roomBookings.status, "awaiting_confirmation"))).returning();
+        .where(and(eq(roomBookings.id, roomBookingId), eq(roomBookings.createdByPersonId, personId), eq(roomBookings.status, "awaiting_confirmation"))).returning();
       if (!booking) throw new Error("Only the room-flow creator can submit this request once.");
       const [outbox] = await tx.insert(outboxEvents).values({ organizationId: booking.organizationId, type: "room.submission_requested", aggregateId: booking.id, payload: {} }).onConflictDoNothing().returning();
       return { ...asRoomBooking(booking), outboxEvents: outbox ? [asPendingOutboxEvent(outbox)] : [] };
@@ -772,7 +876,7 @@ export class PostgresCoordinatorRepository implements CoordinatorRepository {
     const rows = await db.select().from(meetingParticipants).where(eq(meetingParticipants.meetingId, meetingId));
     return rows.map((row) => ({
       meetingId: id<"MeetingId">(row.meetingId),
-      memberId: row.memberId ? id<"MemberId">(row.memberId) : undefined,
+      personId: row.personId ? id<"OrganizationPersonId">(row.personId) : undefined,
       kind: row.kind as MeetingParticipant["kind"],
       displayNameSnapshot: row.displayNameSnapshot,
       calendarInviteEmailSnapshot: row.calendarInviteEmailSnapshot as MeetingParticipant["calendarInviteEmailSnapshot"],
@@ -803,13 +907,14 @@ export class PostgresCoordinatorRepository implements CoordinatorRepository {
       organizerEmail: row.accountEmail as OrganizerCalendarConnection["organizerEmail"],
       provider: "google_calendar",
       status: row.status,
+      authorizedByPersonId: row.authorizedByPersonId ? id<"OrganizationPersonId">(row.authorizedByPersonId) : undefined,
     };
   }
 
-  async canManageMeeting(meetingId: string, invocation: ClientInvocation) {
+  async canManageMeeting(meetingId: string, actor: ActorContext) {
     const meeting = await this.getMeetingForConfirmation(meetingId);
-    if (!meeting || meeting.organizationId !== invocation.organizationId || !invocation.userId) return false;
-    return meeting.createdBy === invocation.userId;
+    if (!meeting || meeting.organizationId !== actor.organizationId) return false;
+    return meeting.createdByPersonId === actor.personId;
   }
 
   async cancelMeeting(meetingId: string) {
@@ -826,11 +931,19 @@ export class PostgresCoordinatorRepository implements CoordinatorRepository {
     });
   }
 
-  async createPlanningSession(input: { organizationId: string; createdByUserId: string; notificationChannelId: string; kind?: "create" | "reschedule"; sourceMeetingId?: string }) {
+  async createPlanningSession(input: { organizationId: string; createdByPersonId: string; initiatedViaIntegrationId: string; statusAnnouncementEndpointId?: string; kind?: "create" | "reschedule"; sourceMeetingId?: string }) {
+    const [legacyUserId, legacyChannelId] = await Promise.all([
+      this.requireLegacyUserId(input.organizationId, input.createdByPersonId),
+      this.legacyAnnouncement(input.statusAnnouncementEndpointId),
+    ]);
     const [row] = await db.insert(planningSessions).values({
       organizationId: input.organizationId,
-      createdByUserId: input.createdByUserId,
-      notificationChannelId: input.notificationChannelId,
+      createdByUserId: legacyUserId,
+      createdByPersonId: input.createdByPersonId,
+      initiatedViaIntegrationId: input.initiatedViaIntegrationId,
+      statusAnnouncementEndpointId: input.statusAnnouncementEndpointId,
+      notificationClient: "discord",
+      notificationChannelId: legacyChannelId,
       kind: input.kind ?? "create",
       sourceMeetingId: input.sourceMeetingId,
       expiresAt: new Date(Date.now() + 24 * 60 * 60_000),
@@ -839,27 +952,27 @@ export class PostgresCoordinatorRepository implements CoordinatorRepository {
     return asPlanningSession(row);
   }
 
-  async addDiscordPlanningAudience(input: { planningSessionId: string; organizationId: string; source: ClientAudienceReference; discordUserIds: Array<{ id: string; displayName: string }> }) {
+  async addPlanningAudience(input: { planningSessionId: string; actor: ActorContext; source: AudienceReference; people: Array<{ personId: string; displayName: string }> }) {
     return db.transaction(async (tx) => {
       const session = await tx.query.planningSessions.findFirst({ where: eq(planningSessions.id, input.planningSessionId) });
-      if (!session || session.organizationId !== input.organizationId || session.expiresAt < new Date()) throw new Error("This planning session has expired.");
-      for (const candidate of input.discordUserIds) {
-        const existing = await tx.select({ user: users }).from(users).innerJoin(clientIdentities, eq(clientIdentities.userId, users.id))
-          .where(and(eq(users.organizationId, input.organizationId), eq(clientIdentities.client, "discord"), eq(clientIdentities.subjectId, candidate.id)));
-        let user = existing[0]?.user;
-        if (!user) {
-          [user] = await tx.insert(users).values({ organizationId: input.organizationId }).returning();
-          if (user) await tx.insert(clientIdentities).values({ userId: user.id, client: "discord", subjectId: candidate.id });
-        }
-        if (!user) continue;
-        const member = user.memberId ? await tx.query.members.findFirst({ where: eq(members.id, user.memberId) }) : undefined;
-        const connection = member ? await tx.query.calendarConnections.findFirst({ where: and(eq(calendarConnections.memberId, member.id), eq(calendarConnections.kind, "availability"), eq(calendarConnections.status, "active")) }) : undefined;
-        const readiness = !member ? "needs_invite_email" : !connection ? "needs_availability" : "ready";
+      if (!session || session.organizationId !== input.actor.organizationId || session.expiresAt < new Date()) throw new Error("This planning session has expired.");
+      if (session.createdByPersonId !== input.actor.personId) throw new Error("Only the person who started this planning session can edit it.");
+      const [selection] = await tx.insert(planningAudienceSelections).values({ planningSessionId: session.id, selectedByPersonId: input.actor.personId, integrationId: input.actor.integrationId, source: input.source }).returning();
+      if (!selection) throw new Error("Unable to audit the selected audience.");
+      const distinctPeople = [...new Map(input.people.map((person) => [person.personId, person])).values()];
+      if (distinctPeople.length) await tx.insert(planningAudienceSelectionPeople).values(distinctPeople.map((person) => ({ selectionId: selection.id, personId: person.personId }))).onConflictDoNothing();
+      for (const candidate of distinctPeople) {
+        const person = await tx.query.organizationPeople.findFirst({ where: and(eq(organizationPeople.id, candidate.personId), eq(organizationPeople.organizationId, input.actor.organizationId), eq(organizationPeople.status, "active")) });
+        if (!person) throw new Error("Every selected attendee must belong to this organization.");
+        const calendarInvite = await tx.select({ endpointId: notificationEndpoints.id }).from(personNotificationEndpointBindings)
+          .innerJoin(notificationEndpoints, eq(notificationEndpoints.id, personNotificationEndpointBindings.endpointId))
+          .where(and(eq(personNotificationEndpointBindings.personId, person.id), eq(personNotificationEndpointBindings.purpose, "calendar_invite"), eq(notificationEndpoints.driverId, "email"), eq(notificationEndpoints.status, "active")));
+        const connection = await tx.query.calendarConnections.findFirst({ where: and(eq(calendarConnections.personId, person.id), eq(calendarConnections.kind, "availability"), eq(calendarConnections.status, "active")) });
+        const readiness = !calendarInvite.length ? "needs_invite_email" : !connection ? "needs_availability" : "ready";
         await tx.insert(planningAttendees).values({
           planningSessionId: session.id,
-          userId: user.id,
-          memberId: member?.id,
-          displayName: member?.displayName ?? candidate.displayName,
+          personId: person.id,
+          displayName: person.displayName || candidate.displayName,
           source: input.source,
           readiness,
         }).onConflictDoNothing();
@@ -917,76 +1030,69 @@ export class PostgresCoordinatorRepository implements CoordinatorRepository {
   }
 
   async getPlanningAvailability(sessionId: string) {
-    const rows = await db.select({ attendee: planningAttendees, member: members, connection: calendarConnections }).from(planningAttendees)
-      .leftJoin(members, eq(members.id, planningAttendees.memberId))
-      .leftJoin(calendarConnections, and(eq(calendarConnections.memberId, members.id), eq(calendarConnections.kind, "availability"), eq(calendarConnections.status, "active")))
+    const rows = await db.select({ attendee: planningAttendees, person: organizationPeople, connection: calendarConnections }).from(planningAttendees)
+      .leftJoin(organizationPeople, eq(organizationPeople.id, planningAttendees.personId))
+      .leftJoin(calendarConnections, and(eq(calendarConnections.personId, planningAttendees.personId), eq(calendarConnections.kind, "availability"), eq(calendarConnections.status, "active")))
       .where(eq(planningAttendees.planningSessionId, sessionId));
-    return rows.map((row) => ({ attendee: asPlanningAttendee(row.attendee), member: row.member ?? undefined, connection: row.connection ?? undefined }));
+    return rows.map((row) => ({ attendee: asPlanningAttendee(row.attendee), person: row.person ?? undefined, connection: row.connection ?? undefined }));
   }
 
   async listPlanningEnrollmentRequests(sessionId: string) {
-    const rows = await db.select({ attendee: planningAttendees, discordUserId: clientIdentities.subjectId }).from(planningAttendees)
-      .innerJoin(clientIdentities, and(eq(clientIdentities.userId, planningAttendees.userId), eq(clientIdentities.client, "discord")))
+    const rows = await db.select({ attendee: planningAttendees, discordUserId: integrationIdentities.externalSubjectId }).from(planningAttendees)
+      .innerJoin(planningSessions, eq(planningSessions.id, planningAttendees.planningSessionId))
+      .innerJoin(integrationIdentities, and(eq(integrationIdentities.personId, planningAttendees.personId), eq(integrationIdentities.integrationId, planningSessions.initiatedViaIntegrationId)))
       .where(eq(planningAttendees.planningSessionId, sessionId));
     return rows.filter((row) => row.attendee.readiness === "needs_invite_email" || row.attendee.readiness === "needs_availability")
       .map((row) => ({ attendeeId: row.attendee.id, discordUserId: row.discordUserId, readiness: row.attendee.readiness }));
   }
 
   async getPlanningEnrollment(attendeeId: string, discordUserId: string) {
-    const rows = await db.select({ attendee: planningAttendees, session: planningSessions, user: users, member: members }).from(planningAttendees)
+    const rows = await db.select({ attendee: planningAttendees, session: planningSessions, person: organizationPeople }).from(planningAttendees)
       .innerJoin(planningSessions, eq(planningSessions.id, planningAttendees.planningSessionId))
-      .innerJoin(users, eq(users.id, planningAttendees.userId))
-      .innerJoin(clientIdentities, and(eq(clientIdentities.userId, users.id), eq(clientIdentities.client, "discord"), eq(clientIdentities.subjectId, discordUserId)))
-      .leftJoin(members, eq(members.id, planningAttendees.memberId))
+      .innerJoin(organizationPeople, eq(organizationPeople.id, planningAttendees.personId))
+      .innerJoin(integrationIdentities, and(eq(integrationIdentities.personId, planningAttendees.personId), eq(integrationIdentities.integrationId, planningSessions.initiatedViaIntegrationId), eq(integrationIdentities.externalSubjectId, discordUserId)))
       .where(eq(planningAttendees.id, attendeeId));
     const row = rows[0];
-    return row ? { attendee: asPlanningAttendee(row.attendee), session: asPlanningSession(row.session), user: row.user, member: row.member ?? undefined } : undefined;
+    return row ? { attendee: asPlanningAttendee(row.attendee), session: asPlanningSession(row.session), person: row.person } : undefined;
   }
 
   async registerPlanningAttendeeEmail(input: { attendeeId: string; discordUserId: string; email: string }) {
-    return db.transaction(async (tx) => {
-      const found = await tx.select({ attendee: planningAttendees, session: planningSessions, user: users }).from(planningAttendees)
-        .innerJoin(planningSessions, eq(planningSessions.id, planningAttendees.planningSessionId))
-        .innerJoin(users, eq(users.id, planningAttendees.userId))
-        .innerJoin(clientIdentities, and(eq(clientIdentities.userId, users.id), eq(clientIdentities.client, "discord"), eq(clientIdentities.subjectId, input.discordUserId)))
-        .where(eq(planningAttendees.id, input.attendeeId));
-      const row = found[0];
-      if (!row) throw new Error("This enrollment request is not valid for your Discord account.");
-      const email = input.email.trim().toLowerCase();
-      const existing = await tx.query.members.findFirst({ where: and(eq(members.organizationId, row.session.organizationId), eq(members.calendarInviteEmail, email)) });
-      const member = existing ?? (await tx.insert(members).values({ organizationId: row.session.organizationId, displayName: row.attendee.displayName, calendarInviteEmail: email }).returning())[0];
-      if (!member) throw new Error("Unable to save the invite email.");
-      await tx.update(users).set({ memberId: member.id }).where(eq(users.id, row.user.id));
-      await tx.update(planningAttendees).set({ memberId: member.id, readiness: "needs_availability" }).where(eq(planningAttendees.id, row.attendee.id));
-      return { organizationId: row.session.organizationId, userId: row.user.id, memberId: member.id, displayName: member.displayName };
-    });
+    const enrollment = await this.getPlanningEnrollment(input.attendeeId, input.discordUserId);
+    if (!enrollment) throw new Error("This enrollment request is not valid for your Discord account.");
+    await this.registerPersonProfile({ organizationId: enrollment.session.organizationId, personId: enrollment.person.id, displayName: enrollment.person.displayName, inviteEmail: input.email });
+    await db.update(planningAttendees).set({ readiness: "needs_availability" }).where(eq(planningAttendees.id, input.attendeeId));
+    return { organizationId: enrollment.session.organizationId, personId: enrollment.person.id, displayName: enrollment.person.displayName };
   }
 
   async setPlanningAttendeeFallbackEmail(input: { sessionId: string; attendeeId: string; email: string }) {
     return db.transaction(async (tx) => {
-      const row = await tx.select({ attendee: planningAttendees, session: planningSessions, user: users }).from(planningAttendees)
+      const row = await tx.select({ attendee: planningAttendees, session: planningSessions, person: organizationPeople }).from(planningAttendees)
         .innerJoin(planningSessions, eq(planningSessions.id, planningAttendees.planningSessionId))
-        .innerJoin(users, eq(users.id, planningAttendees.userId))
+        .innerJoin(organizationPeople, eq(organizationPeople.id, planningAttendees.personId))
         .where(and(eq(planningAttendees.id, input.attendeeId), eq(planningSessions.id, input.sessionId)));
       const found = row[0];
       if (!found) throw new Error("That attendee is not part of this planning session.");
       const email = input.email.trim().toLowerCase();
-      const existing = await tx.query.members.findFirst({ where: and(eq(members.organizationId, found.session.organizationId), eq(members.calendarInviteEmail, email)) });
-      const member = existing ?? (await tx.insert(members).values({ organizationId: found.session.organizationId, displayName: found.attendee.displayName, calendarInviteEmail: email }).returning())[0];
-      if (!member) throw new Error("Unable to save the fallback invite email.");
-      await tx.update(users).set({ memberId: member.id }).where(eq(users.id, found.user.id));
-      await tx.update(planningAttendees).set({ memberId: member.id, readiness: "unverified" }).where(eq(planningAttendees.id, found.attendee.id));
+      const endpoint = await tx.query.notificationEndpoints.findFirst({ where: and(eq(notificationEndpoints.organizationId, found.session.organizationId), eq(notificationEndpoints.driverId, "email"), eq(notificationEndpoints.address, email), isNull(notificationEndpoints.integrationId)) });
+      const [savedEndpoint] = endpoint
+        ? await tx.update(notificationEndpoints).set({ status: "active", updatedAt: new Date() }).where(eq(notificationEndpoints.id, endpoint.id)).returning()
+        : await tx.insert(notificationEndpoints).values({ organizationId: found.session.organizationId, driverId: "email", address: email, configuration: {} }).returning();
+      if (!savedEndpoint) throw new Error("Unable to save the fallback invite endpoint.");
+      await tx.delete(personNotificationEndpointBindings).where(and(eq(personNotificationEndpointBindings.personId, found.person.id), eq(personNotificationEndpointBindings.purpose, "calendar_invite")));
+      await tx.insert(personNotificationEndpointBindings).values({ personId: found.person.id, endpointId: savedEndpoint.id, purpose: "calendar_invite" });
+      await tx.update(organizationPeople).set({ invitationEmail: email, updatedAt: new Date() }).where(eq(organizationPeople.id, found.person.id));
+      await tx.update(planningAttendees).set({ readiness: "unverified" }).where(eq(planningAttendees.id, found.attendee.id));
       const attendees = await tx.select().from(planningAttendees).where(eq(planningAttendees.planningSessionId, found.session.id));
       const status = attendees.every((attendee) => attendee.readiness === "ready" || attendee.readiness === "unverified") ? "ready" : "waiting_for_requirements";
       await tx.update(planningSessions).set({ status, updatedAt: new Date() }).where(eq(planningSessions.id, found.session.id));
-      return asPlanningAttendee({ ...found.attendee, memberId: member.id, readiness: "unverified" });
+      return asPlanningAttendee({ ...found.attendee, readiness: "unverified" });
     });
   }
 
-  async refreshPlanningReadinessForMember(memberId: string) {
-    const affected = await db.select({ sessionId: planningAttendees.planningSessionId }).from(planningAttendees).where(eq(planningAttendees.memberId, memberId));
+  async refreshPlanningReadinessForPerson(personId: string) {
+    const affected = await db.select({ sessionId: planningAttendees.planningSessionId }).from(planningAttendees).where(eq(planningAttendees.personId, personId));
     if (!affected.length) return;
-    await db.update(planningAttendees).set({ readiness: "ready" }).where(eq(planningAttendees.memberId, memberId));
+    await db.update(planningAttendees).set({ readiness: "ready" }).where(eq(planningAttendees.personId, personId));
     for (const { sessionId } of affected) {
       const attendees = await db.select().from(planningAttendees).where(eq(planningAttendees.planningSessionId, sessionId));
       const status = attendees.every((attendee) => attendee.readiness === "ready" || attendee.readiness === "unverified") ? "ready" : "waiting_for_requirements";
@@ -1006,12 +1112,16 @@ export class PostgresCoordinatorRepository implements CoordinatorRepository {
       const unresolved = attendees.filter((attendee) => attendee.readiness !== "ready" && attendee.readiness !== "unverified");
       if (unresolved.length) throw new Error("Some attendees still need an invite email or availability connection.");
       const participantRows = await Promise.all(attendees.map(async (attendee) => {
-        if (!attendee.memberId) throw new Error("An unverified attendee needs an invite email before confirmation.");
-        const member = await tx.query.members.findFirst({ where: eq(members.id, attendee.memberId) });
-        if (!member) throw new Error("A selected attendee no longer exists.");
-        return { memberId: member.id, kind: "registered_member", displayNameSnapshot: member.displayName, calendarInviteEmailSnapshot: member.calendarInviteEmail, attendanceRole: "required" as const };
+        if (!attendee.personId) throw new Error("A selected attendee has not been resolved to an organization person.");
+        const rows = await tx.select({ person: organizationPeople, endpoint: notificationEndpoints }).from(organizationPeople)
+          .innerJoin(personNotificationEndpointBindings, and(eq(personNotificationEndpointBindings.personId, organizationPeople.id), eq(personNotificationEndpointBindings.purpose, "calendar_invite")))
+          .innerJoin(notificationEndpoints, and(eq(notificationEndpoints.id, personNotificationEndpointBindings.endpointId), eq(notificationEndpoints.driverId, "email"), eq(notificationEndpoints.status, "active")))
+          .where(eq(organizationPeople.id, attendee.personId));
+        const recipient = rows[0];
+        if (!recipient) throw new Error("A selected attendee needs a Calendar-invite email endpoint.");
+        return { personId: recipient.person.id, kind: "registered_member", displayNameSnapshot: recipient.person.displayName, calendarInviteEmailSnapshot: recipient.endpoint.address, attendanceRole: "required" as const };
       }));
-      const guestRows = session.guestEmails.map((guest) => ({ memberId: null, kind: "email_guest", displayNameSnapshot: guest.displayName || guest.email, calendarInviteEmailSnapshot: guest.email.trim().toLowerCase(), attendanceRole: "required" as const }));
+      const guestRows = session.guestEmails.map((guest) => ({ personId: null, kind: "email_guest", displayNameSnapshot: guest.displayName || guest.email, calendarInviteEmailSnapshot: guest.email.trim().toLowerCase(), attendanceRole: "required" as const }));
       let meetingId: string;
       let version: number;
       if (session.kind === "reschedule" && session.sourceMeetingId) {
@@ -1022,7 +1132,7 @@ export class PostgresCoordinatorRepository implements CoordinatorRepository {
         await tx.insert(meetingParticipants).values([...participantRows, ...guestRows].map((participant) => ({ ...participant, meetingId: meeting.id })));
         meetingId = meeting.id; version = meeting.version;
       } else {
-        const [meeting] = await tx.insert(meetings).values({ organizationId: session.organizationId, mode: "direct", status: "calendar_pending", title: session.title.trim(), timeZone: "America/New_York", startsAt: session.selectedStartsAt, endsAt: session.selectedEndsAt, createdByUserId: session.createdByUserId, notificationClient: session.notificationClient, notificationChannelId: session.notificationChannelId }).returning();
+        const [meeting] = await tx.insert(meetings).values({ organizationId: session.organizationId, mode: "direct", status: "calendar_pending", title: session.title.trim(), timeZone: "America/New_York", startsAt: session.selectedStartsAt, endsAt: session.selectedEndsAt, createdByUserId: session.createdByUserId, createdByPersonId: session.createdByPersonId, initiatedViaIntegrationId: session.initiatedViaIntegrationId, statusAnnouncementEndpointId: session.statusAnnouncementEndpointId, notificationClient: session.notificationClient, notificationChannelId: session.notificationChannelId }).returning();
         if (!meeting) throw new Error("Unable to create the meeting.");
         await tx.insert(meetingParticipants).values([...participantRows, ...guestRows].map((participant) => ({ ...participant, meetingId: meeting.id })));
         meetingId = meeting.id; version = meeting.version;
@@ -1122,19 +1232,23 @@ export class PostgresCoordinatorRepository implements CoordinatorRepository {
     const meeting = await this.getMeetingForConfirmation(meetingId);
     if (!meeting?.time || meeting.status !== "scheduled") return undefined;
     const event = await this.getExistingCalendarEvent(meetingId);
-    return { meeting, htmlLink: event?.htmlLink };
+    const endpoint = meeting.statusAnnouncementEndpointId
+      ? await db.query.notificationEndpoints.findFirst({ where: and(eq(notificationEndpoints.id, meeting.statusAnnouncementEndpointId), eq(notificationEndpoints.status, "active")) })
+      : undefined;
+    return { meeting, endpoint: endpoint ? asNotificationEndpoint(endpoint) : undefined, htmlLink: event?.htmlLink };
   }
 
   async loadReminder(meetingId: string) {
     const meeting = await this.getMeetingForConfirmation(meetingId);
     if (!meeting) return undefined;
-    const rows = await db.select({ discordUserId: clientIdentities.subjectId })
+    const rows = await db.select({ endpoint: notificationEndpoints })
       .from(meetingParticipants)
-      .innerJoin(users, eq(users.memberId, meetingParticipants.memberId))
-      .innerJoin(clientIdentities, and(eq(clientIdentities.userId, users.id), eq(clientIdentities.client, "discord")))
+      .innerJoin(personNotificationEndpointBindings, and(eq(personNotificationEndpointBindings.personId, meetingParticipants.personId), eq(personNotificationEndpointBindings.purpose, "direct_notification")))
+      .innerJoin(notificationEndpoints, and(eq(notificationEndpoints.id, personNotificationEndpointBindings.endpointId), eq(notificationEndpoints.status, "active")))
       .where(eq(meetingParticipants.meetingId, meetingId));
     const event = await db.query.calendarEvents.findFirst({ where: eq(calendarEvents.meetingId, meetingId) });
-    return { meeting, discordUserIds: [...new Set(rows.map((row) => row.discordUserId))], htmlLink: event?.htmlLink };
+    const endpoints = [...new Map(rows.map((row) => [row.endpoint.id, asNotificationEndpoint(row.endpoint)])).values()];
+    return { meeting, endpoints, htmlLink: event?.htmlLink };
   }
 
   async upsertIntegrationPeople(input: { integrationId: string; people: Array<{ subjectId: string; displayName: string }> }) {
@@ -1154,6 +1268,13 @@ export class PostgresCoordinatorRepository implements CoordinatorRepository {
           await tx.insert(integrationIdentities).values({ integrationId: input.integrationId, personId: person.id, externalSubjectId: candidate.subjectId });
         } else if (candidate.displayName && person.displayName !== candidate.displayName) {
           [person] = await tx.update(organizationPeople).set({ displayName: candidate.displayName, updatedAt: new Date() }).where(eq(organizationPeople.id, person.id)).returning();
+        }
+        if (integration.kind === "discord" && person) {
+          const endpoint = await tx.query.notificationEndpoints.findFirst({ where: and(eq(notificationEndpoints.organizationId, integration.organizationId), eq(notificationEndpoints.integrationId, input.integrationId), eq(notificationEndpoints.driverId, "discord.dm"), eq(notificationEndpoints.address, candidate.subjectId)) });
+          const [dmEndpoint] = endpoint
+            ? await tx.update(notificationEndpoints).set({ status: "active", updatedAt: new Date() }).where(eq(notificationEndpoints.id, endpoint.id)).returning()
+            : await tx.insert(notificationEndpoints).values({ organizationId: integration.organizationId, integrationId: input.integrationId, driverId: "discord.dm", address: candidate.subjectId, configuration: {} }).returning();
+          if (dmEndpoint) await tx.insert(personNotificationEndpointBindings).values({ personId: person.id, endpointId: dmEndpoint.id, purpose: "direct_notification" }).onConflictDoNothing();
         }
         if (person) resolved.push({ id: person.id, displayName: person.displayName });
       }
@@ -1352,12 +1473,12 @@ export class PostgresCoordinatorRepository implements CoordinatorRepository {
   }
 
   async loadTaskReminder(assignmentId: string) {
-    const rows = await db.select({ assignment: taskAssignments, task: tasks, preference: personTaskReminderPreferences, integration: organizationClientIntegrations, identity: integrationIdentities })
+    const rows = await db.select({ assignment: taskAssignments, task: tasks, preference: personTaskReminderPreferences, endpoint: notificationEndpoints })
       .from(taskAssignments)
       .innerJoin(tasks, eq(tasks.id, taskAssignments.taskId))
-      .innerJoin(organizationClientIntegrations, eq(organizationClientIntegrations.id, tasks.sourceIntegrationId))
       .leftJoin(personTaskReminderPreferences, eq(personTaskReminderPreferences.personId, taskAssignments.personId))
-      .leftJoin(integrationIdentities, and(eq(integrationIdentities.integrationId, tasks.sourceIntegrationId), eq(integrationIdentities.personId, taskAssignments.personId)))
+      .leftJoin(personNotificationEndpointBindings, and(eq(personNotificationEndpointBindings.personId, taskAssignments.personId), eq(personNotificationEndpointBindings.purpose, "direct_notification")))
+      .leftJoin(notificationEndpoints, and(eq(notificationEndpoints.id, personNotificationEndpointBindings.endpointId), eq(notificationEndpoints.integrationId, tasks.sourceIntegrationId), eq(notificationEndpoints.status, "active")))
       .where(eq(taskAssignments.id, assignmentId));
     const row = rows[0];
     if (!row) return undefined;
@@ -1365,15 +1486,16 @@ export class PostgresCoordinatorRepository implements CoordinatorRepository {
       task: asTask(row.task),
       assignment: asTaskAssignment(row.assignment),
       defaultPolicy: row.preference?.defaultPolicy ?? "daily_until_done" as TaskReminderPolicy,
-      client: row.integration.kind as "discord" | "slack" | "web",
-      recipientSubjectId: row.identity?.externalSubjectId,
+      endpoint: row.endpoint ? asNotificationEndpoint(row.endpoint) : undefined,
     };
   }
 
-  async recordTaskReminderDelivery(input: { assignmentId: string; integrationId: string; reminderRevision: number; scheduledFor: Date; status: "sent" | "failed" | "skipped"; error?: string }) {
-    await db.insert(taskReminderDeliveries).values({ ...input, error: input.error ?? null }).onConflictDoUpdate({
+  async recordTaskReminderDelivery(input: { assignmentId: string; endpointId: string; reminderRevision: number; scheduledFor: Date; status: "sent" | "failed" | "skipped"; error?: string }) {
+    const endpoint = await db.query.notificationEndpoints.findFirst({ where: eq(notificationEndpoints.id, input.endpointId) });
+    if (!endpoint?.integrationId) throw new Error("Task reminder delivery requires an integration-backed endpoint.");
+    await db.insert(taskReminderDeliveries).values({ ...input, integrationId: endpoint.integrationId, error: input.error ?? null }).onConflictDoUpdate({
       target: [taskReminderDeliveries.assignmentId, taskReminderDeliveries.reminderRevision, taskReminderDeliveries.scheduledFor],
-      set: { status: input.status, error: input.error ?? null, integrationId: input.integrationId },
+      set: { status: input.status, error: input.error ?? null, integrationId: endpoint.integrationId, endpointId: input.endpointId },
     });
   }
 

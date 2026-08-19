@@ -1,12 +1,12 @@
 import { createGoogleCalendarEvent, deleteGoogleCalendarEvent } from "@technyu/adapters/google";
-import { BuiltInDirectNotificationDispatcher, sendDiscordChannelMessage, sendDiscordDm } from "@technyu/adapters/discord";
+import { BuiltInNotificationDispatcher, sendDiscordChannelMessage, sendDiscordDm } from "@technyu/adapters/discord";
 import { effectiveTaskReminderPolicy, isRecurringTaskReminder, nextTaskReminderAt, type OutboxPublisher } from "@technyu/application";
 import type { PostgresCoordinatorRepository } from "@technyu/db";
 import { apiInngest } from "./client.ts";
 import { workflowError, workflowLog, workflowWarn } from "./log.ts";
 
 export function createApiWorkflowFunctions(repository: PostgresCoordinatorRepository, publisher: OutboxPublisher) {
-  const notifications = new BuiltInDirectNotificationDispatcher();
+  const notifications = new BuiltInNotificationDispatcher();
   const outboxSweep = apiInngest.createFunction(
     { id: "outbox-sweep", retries: 3 },
     { cron: "* * * * *" },
@@ -50,13 +50,14 @@ export function createApiWorkflowFunctions(repository: PostgresCoordinatorReposi
         }));
         workflowLog("workflow-api", "calendar.sync.persisted", { meetingId: current.meeting.id });
         const announcement = hydrateAnnouncement(await step.run("load-announcement", () => repository.loadAnnouncement(current.meeting.id)));
-        if (announcement?.meeting.notificationTarget.client === "discord") {
+        if (announcement?.endpoint?.driverId === "discord.channel") {
+          const endpoint = announcement.endpoint;
           await step.run("announce-to-discord", () => sendDiscordChannelMessage(
-            announcement.meeting.notificationTarget.channelId,
+            endpoint.address,
             formatAnnouncement(announcement.meeting, announcement.htmlLink ?? undefined),
             [{ type: 1, components: [{ type: 2, style: 1, custom_id: `room-start:${announcement.meeting.id}`, label: "Find a room" }] }],
           ));
-          workflowLog("workflow-api", "calendar.discord.announced", { meetingId: current.meeting.id, channelId: announcement.meeting.notificationTarget.channelId });
+          workflowLog("workflow-api", "calendar.discord.announced", { meetingId: current.meeting.id, endpointId: endpoint.id });
         }
         if (announcement?.meeting.time) {
           const when = new Date(announcement.meeting.time.startsAt.getTime() - 60 * 60_000);
@@ -109,8 +110,8 @@ export function createApiWorkflowFunctions(repository: PostgresCoordinatorReposi
         return { skipped: true };
       }
       const text = `Reminder: **${loaded.meeting.title}** starts in one hour.\n${loaded.meeting.time!.startsAt.toLocaleString("en-US", { timeZone: loaded.meeting.timeZone, dateStyle: "medium", timeStyle: "short" })}${loaded.htmlLink ? `\nGoogle Calendar: ${loaded.htmlLink}` : ""}`;
-      await step.run("send-discord-reminders", () => Promise.allSettled(loaded.discordUserIds.map((discordUserId) => sendDiscordDm(discordUserId, text))));
-      workflowLog("workflow-api", "reminder.completed", { meetingId: event.data.meetingId, recipientCount: loaded.discordUserIds.length });
+      await step.run("send-meeting-reminders", () => Promise.allSettled(loaded.endpoints.filter((endpoint) => endpoint.driverId === "discord.dm").map((endpoint) => sendDiscordDm(endpoint.address, text))));
+      workflowLog("workflow-api", "reminder.completed", { meetingId: event.data.meetingId, recipientCount: loaded.endpoints.length });
       return { meetingId: event.data.meetingId };
     },
   );
@@ -140,30 +141,37 @@ export function createApiWorkflowFunctions(repository: PostgresCoordinatorReposi
         workflowWarn("workflow-api", "task.reminder.skipped", { assignmentId, reminderVersion, reason: "assignment_changed_while_waiting" });
         return { skipped: true };
       }
-      if (!current.recipientSubjectId || current.client === "web") {
-        await step.run("record-unaddressable-delivery", () => repository.recordTaskReminderDelivery({ assignmentId, integrationId: current.task.sourceIntegrationId, reminderRevision: reminderVersion, scheduledFor, status: "failed", error: "No direct-message identity exists for this task's source client." }));
-        workflowWarn("workflow-api", "task.reminder.delivery_failed", { assignmentId, reminderVersion, reason: "missing_direct_identity" });
-        return { delivered: false, reason: "missing_direct_identity" };
+      if (!current.endpoint) {
+        workflowWarn("workflow-api", "task.reminder.delivery_failed", { assignmentId, reminderVersion, reason: "missing_direct_endpoint" });
+        return { delivered: false, reason: "missing_direct_endpoint" };
       }
+      if (current.endpoint.status !== "active") {
+        const endpoint = current.endpoint;
+        await step.run("record-unaddressable-delivery", () => repository.recordTaskReminderDelivery({ assignmentId, endpointId: endpoint.id, reminderRevision: reminderVersion, scheduledFor, status: "failed", error: "The selected direct-notification endpoint is disabled." }));
+        workflowWarn("workflow-api", "task.reminder.delivery_failed", { assignmentId, reminderVersion, reason: "disabled_direct_endpoint" });
+        return { delivered: false, reason: "disabled_direct_endpoint" };
+      }
+      const endpoint = current.endpoint;
       try {
-        workflowLog("workflow-api", "task.reminder.delivery_started", { assignmentId, reminderVersion, client: current.client });
-        await step.run("send-task-direct-notification", () => notifications.send({
-          client: current.client as "discord" | "slack",
-          recipientSubjectId: current.recipientSubjectId as string,
-          title: current.task.title,
-          body: formatTaskReminder(current.task, scheduledFor),
-          actions: [
+        workflowLog("workflow-api", "task.reminder.delivery_started", { assignmentId, reminderVersion, driverId: endpoint.driverId });
+        await step.run("send-task-direct-notification", () => notifications.dispatch({
+          endpoint,
+          event: {
+            title: current.task.title,
+            body: formatTaskReminder(current.task, scheduledFor),
+            actions: [
             { kind: "complete_task_assignment", assignmentId, label: "Mark done" },
             { kind: "change_task_reminder", assignmentId, label: "Reminder settings" },
-          ],
+            ],
+          },
           idempotencyKey: `task-reminder:${assignmentId}:${reminderVersion}:${scheduledFor.getTime()}`,
         }));
-        await step.run("record-task-delivery", () => repository.recordTaskReminderDelivery({ assignmentId, integrationId: current.task.sourceIntegrationId, reminderRevision: reminderVersion, scheduledFor, status: "sent" }));
+        await step.run("record-task-delivery", () => repository.recordTaskReminderDelivery({ assignmentId, endpointId: endpoint.id, reminderRevision: reminderVersion, scheduledFor, status: "sent" }));
         workflowLog("workflow-api", "task.reminder.delivery_succeeded", { assignmentId, reminderVersion });
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
-        await step.run("record-task-delivery-failure", () => repository.recordTaskReminderDelivery({ assignmentId, integrationId: current.task.sourceIntegrationId, reminderRevision: reminderVersion, scheduledFor, status: "failed", error: message.slice(0, 500) }));
-        workflowError("workflow-api", "task.reminder.delivery_failed", error, { assignmentId, reminderVersion, client: current.client });
+        await step.run("record-task-delivery-failure", () => repository.recordTaskReminderDelivery({ assignmentId, endpointId: endpoint.id, reminderRevision: reminderVersion, scheduledFor, status: "failed", error: message.slice(0, 500) }));
+        workflowError("workflow-api", "task.reminder.delivery_failed", error, { assignmentId, reminderVersion, driverId: endpoint.driverId });
         throw error;
       }
       if (isRecurringTaskReminder(policy)) {

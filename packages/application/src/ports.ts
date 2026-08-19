@@ -1,8 +1,8 @@
 import type {
   Meeting,
   MeetingParticipant,
+  NotificationEndpoint,
   OrganizerCalendarConnection,
-  ClientKind,
 } from "@technyu/core";
 
 export type PendingOutboxEvent = {
@@ -47,18 +47,21 @@ export type DirectNotificationAction =
   | { kind: "complete_task_assignment"; assignmentId: string; label: string }
   | { kind: "change_task_reminder"; assignmentId: string; label: string };
 
-export type DirectNotification = {
-  client: Exclude<ClientKind, "web">;
-  recipientSubjectId: string;
+export type NotificationEvent = {
   title: string;
   body: string;
   actions: DirectNotificationAction[];
+};
+
+export type NotificationDispatch = {
+  endpoint: NotificationEndpoint;
+  event: NotificationEvent;
   idempotencyKey: string;
 };
 
 export type DirectNotificationResult = { status: "sent" };
 
-/** A deliberately narrow outbound seam. Web can view tasks but is never an inbox. */
-export interface DirectNotificationDispatcher {
-  send(input: DirectNotification): Promise<DirectNotificationResult>;
+/** Dispatches to one fully resolved endpoint. Adapters own driver-specific behavior. */
+export interface NotificationDispatcher {
+  dispatch(input: NotificationDispatch): Promise<DirectNotificationResult>;
 }

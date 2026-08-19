@@ -2,7 +2,7 @@ import type {
   CalendarConnectionId,
   EmailAddress,
   MeetingId,
-  MemberId,
+  NotificationEndpointId,
   OrganizationId,
   OrganizationClientIntegrationId,
   OrganizationPersonId,
@@ -10,7 +10,6 @@ import type {
   TaskAssignmentId,
   TaskId,
   TeamId,
-  UserId,
 } from "./ids.ts";
 
 export type ClientKind = "discord" | "slack" | "web";
@@ -25,7 +24,6 @@ export type Organization = {
   id: OrganizationId;
   name: string;
   timeZone: TimeZone;
-  discordGuildId: string;
 };
 
 export type OrganizationClientIntegration = {
@@ -49,25 +47,6 @@ export type OrganizationOwner = {
   grantedByPersonId?: OrganizationPersonId;
 };
 
-export type User = {
-  id: UserId;
-  organizationId: OrganizationId;
-  memberId?: MemberId;
-  status: "active" | "disabled";
-};
-
-/** A collaboration-account mapping. Discord is the only implementation today. */
-export type ClientIdentity = {
-  id: import("./ids.ts").ClientIdentityId;
-  userId: UserId;
-  client: Exclude<ClientKind, "web">;
-  subjectId: string;
-};
-
-export type ClientAudienceReference =
-  | { kind: "person"; client: Exclude<ClientKind, "web">; subjectId: string }
-  | { kind: "group"; client: Exclude<ClientKind, "web">; subjectId: string };
-
 /** Reusable organization audience. Client groups are resolved when selected. */
 export type AudienceReference =
   | { kind: "person"; personId: OrganizationPersonId }
@@ -83,25 +62,33 @@ export type Team = {
   createdByPersonId: OrganizationPersonId;
 };
 
-export type NotificationTarget = {
-  client: Exclude<ClientKind, "web">;
-  channelId: string;
+export type NotificationDriverId = "discord.channel" | "discord.dm" | "email";
+
+/** An exact destination, never an inferred client preference. */
+export type NotificationEndpoint = {
+  id: NotificationEndpointId;
+  organizationId: OrganizationId;
+  integrationId?: OrganizationClientIntegrationId;
+  driverId: NotificationDriverId;
+  address: string;
+  configuration: Record<string, unknown>;
+  status: "active" | "disabled";
 };
 
-/** A Calendar invite is possible for every active member without OAuth. */
-export type Member = {
-  id: MemberId;
-  organizationId: OrganizationId;
-  displayName: string;
-  calendarInviteEmail: EmailAddress;
-  status: "active" | "inactive";
+export type NotificationEndpointBindingPurpose = "calendar_invite" | "direct_notification";
+
+export type PersonNotificationEndpointBinding = {
+  id: import("./ids.ts").NotificationEndpointBindingId;
+  personId: OrganizationPersonId;
+  endpointId: NotificationEndpointId;
+  purpose: NotificationEndpointBindingPurpose;
 };
 
 /** Optional, user-consented source for free/busy data only. */
 export type AvailabilityCalendarConnection = {
   id: CalendarConnectionId;
   organizationId: OrganizationId;
-  memberId: MemberId;
+  personId: OrganizationPersonId;
   provider: "google_calendar";
   googleAccountEmail: EmailAddress;
   status: "active" | "revoked" | "expired";
@@ -115,6 +102,7 @@ export type OrganizerCalendarConnection = {
   organizerEmail: EmailAddress;
   provider: "google_calendar";
   status: "active" | "revoked" | "expired";
+  authorizedByPersonId?: OrganizationPersonId;
 };
 
 export type MeetingStatus =
@@ -137,15 +125,16 @@ export type Meeting = {
   discoveryWindow?: DateTimeRange;
   location?: string;
   notes?: string;
-  createdBy: UserId;
-  notificationTarget: NotificationTarget;
+  createdByPersonId: OrganizationPersonId;
+  initiatedViaIntegrationId: OrganizationClientIntegrationId;
+  statusAnnouncementEndpointId?: NotificationEndpointId;
   version: number;
 };
 
-/** Immutable recipient snapshot: later member edits are synchronized deliberately. */
+/** Immutable recipient snapshot: later person edits are synchronized deliberately. */
 export type MeetingParticipant = {
   meetingId: MeetingId;
-  memberId?: MemberId;
+  personId?: OrganizationPersonId;
   kind: "registered_member" | "email_guest";
   displayNameSnapshot: string;
   calendarInviteEmailSnapshot: EmailAddress;
@@ -189,7 +178,7 @@ export type TaskReminderDeliveryStatus = "sent" | "failed" | "skipped";
 
 export type TaskReminderDelivery = {
   assignmentId: TaskAssignmentId;
-  integrationId: OrganizationClientIntegrationId;
+  endpointId: NotificationEndpointId;
   scheduledFor: Date;
   status: TaskReminderDeliveryStatus;
   error?: string;
@@ -202,10 +191,11 @@ export type MeetingPlanningSessionStatus = "collecting_audience" | "waiting_for_
 export type MeetingPlanningSession = {
   id: PlanningSessionId;
   organizationId: OrganizationId;
-  createdBy: UserId;
+  createdByPersonId: OrganizationPersonId;
+  initiatedViaIntegrationId: OrganizationClientIntegrationId;
   kind: "create" | "reschedule";
   sourceMeetingId?: MeetingId;
-  notificationTarget: NotificationTarget;
+  statusAnnouncementEndpointId?: NotificationEndpointId;
   status: MeetingPlanningSessionStatus;
   title?: string;
   selectedTime?: DateTimeRange;
@@ -216,10 +206,9 @@ export type MeetingPlanningSession = {
 export type PlanningAttendee = {
   id: import("./ids.ts").PlanningAttendeeId;
   planningSessionId: PlanningSessionId;
-  userId?: UserId;
-  memberId?: MemberId;
+  personId?: OrganizationPersonId;
   displayName: string;
-  source: ClientAudienceReference;
+  source: AudienceReference;
   readiness: PlanningAttendeeReadiness;
 };
 
@@ -256,7 +245,7 @@ export type OrganizationProviderInstallation = {
   providerId: string;
   status: ProviderInstallationStatus;
   values: Record<string, string>;
-  configuredBy: UserId;
+  configuredByPersonId: OrganizationPersonId;
 };
 
 export type RoomBookingStatus = "discovering" | "awaiting_confirmation" | "submitting" | "request_submitted" | "failed";
@@ -265,7 +254,7 @@ export type RoomBooking = {
   organizationId: OrganizationId;
   meetingId: MeetingId;
   providerInstallationId: import("./ids.ts").ProviderInstallationId;
-  createdBy: UserId;
+  createdByPersonId: OrganizationPersonId;
   status: RoomBookingStatus;
   room?: RoomCandidate;
   providerReference?: string;
@@ -283,18 +272,14 @@ export type OrganizationSetupState = {
   providers: Array<Pick<OrganizationProviderInstallation, "providerId" | "status">>;
 };
 
-export type ClientInvocation = {
+/**
+ * Application commands receive only persisted, client-neutral actor facts.
+ * Transport identifiers and permission formats belong in client adapters.
+ */
+export type ActorContext = {
   idempotencyKey: string;
-  client: ClientKind;
-  organizationId?: OrganizationId;
-  /** Generic client boundary used by new application code. */
-  integrationId?: OrganizationClientIntegrationId;
-  personId?: OrganizationPersonId;
-  discordGuildId?: string;
-  discordUserId: string;
-  /** Resolved/persisted internal user ID; absent only before organization setup. */
-  userId?: UserId;
-  discordRoleIds: string[];
-  isAdministrator: boolean;
-  channelId: string;
+  organizationId: OrganizationId;
+  integrationId: OrganizationClientIntegrationId;
+  personId: OrganizationPersonId;
+  capabilities: ReadonlySet<"organization:admin">;
 };

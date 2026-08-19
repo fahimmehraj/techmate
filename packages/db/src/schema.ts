@@ -112,6 +112,8 @@ export const users = pgTable("users", {
   id: uuid("id").defaultRandom().primaryKey(),
   organizationId: uuid("organization_id").notNull().references(() => organizations.id, { onDelete: "cascade" }),
   memberId: uuid("member_id"),
+  /** Migration-only link. Runtime code uses organization_people directly. */
+  personId: uuid("person_id").references(() => organizationPeople.id),
   status: text("status").notNull().default("active"),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 });
@@ -131,6 +133,8 @@ export const members = pgTable("members", {
   displayName: text("display_name").notNull(),
   calendarInviteEmail: text("calendar_invite_email").notNull(),
   status: text("status").notNull().default("active"),
+  /** Migration-only link. Runtime code uses notification endpoints instead. */
+  personId: uuid("person_id").references(() => organizationPeople.id),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
 }, (table) => [uniqueIndex("members_org_email_unique").on(table.organizationId, table.calendarInviteEmail)]);
@@ -139,6 +143,8 @@ export const calendarConnections = pgTable("calendar_connections", {
   id: uuid("id").defaultRandom().primaryKey(),
   organizationId: uuid("organization_id").notNull().references(() => organizations.id, { onDelete: "cascade" }),
   memberId: uuid("member_id").references(() => members.id, { onDelete: "cascade" }),
+  personId: uuid("person_id").references(() => organizationPeople.id, { onDelete: "cascade" }),
+  authorizedByPersonId: uuid("authorized_by_person_id").references(() => organizationPeople.id, { onDelete: "set null" }),
   kind: connectionKind("kind").notNull(),
   provider: text("provider").notNull().default("google_calendar"),
   calendarId: text("calendar_id"),
@@ -150,6 +156,7 @@ export const calendarConnections = pgTable("calendar_connections", {
 }, (table) => [
   uniqueIndex("calendar_connections_one_organizer_per_org").on(table.organizationId).where(sql`${table.kind} = 'organizer'`),
   uniqueIndex("calendar_connections_one_availability_per_member").on(table.memberId).where(sql`${table.kind} = 'availability'`),
+  uniqueIndex("calendar_connections_one_availability_per_person").on(table.personId).where(sql`${table.kind} = 'availability'`),
 ]);
 
 export const oauthStates = pgTable("oauth_states", {
@@ -157,10 +164,38 @@ export const oauthStates = pgTable("oauth_states", {
   organizationId: uuid("organization_id").notNull().references(() => organizations.id, { onDelete: "cascade" }),
   userId: uuid("user_id").notNull().references(() => users.id, { onDelete: "cascade" }),
   memberId: uuid("member_id").references(() => members.id, { onDelete: "cascade" }),
+  personId: uuid("person_id").references(() => organizationPeople.id, { onDelete: "cascade" }),
   kind: connectionKind("kind").notNull(),
   codeVerifier: text("code_verifier").notNull(),
   expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
 });
+
+/** Exact deliverable destinations; client-specific addressing ends here. */
+export const notificationEndpoints = pgTable("notification_endpoints", {
+  id: uuid("id").defaultRandom().primaryKey(),
+  organizationId: uuid("organization_id").notNull().references(() => organizations.id, { onDelete: "cascade" }),
+  integrationId: uuid("integration_id").references(() => organizationClientIntegrations.id, { onDelete: "cascade" }),
+  driverId: text("driver_id").notNull(),
+  address: text("address").notNull(),
+  configuration: jsonb("configuration").notNull().$type<Record<string, unknown>>().default({}),
+  status: text("status").notNull().default("active"),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+}, (table) => [
+  uniqueIndex("notification_endpoints_global_address_unique").on(table.organizationId, table.driverId, table.address).where(sql`${table.integrationId} IS NULL`),
+  uniqueIndex("notification_endpoints_integration_address_unique").on(table.organizationId, table.integrationId, table.driverId, table.address).where(sql`${table.integrationId} IS NOT NULL`),
+]);
+
+export const personNotificationEndpointBindings = pgTable("person_notification_endpoint_bindings", {
+  id: uuid("id").defaultRandom().primaryKey(),
+  personId: uuid("person_id").notNull().references(() => organizationPeople.id, { onDelete: "cascade" }),
+  endpointId: uuid("endpoint_id").notNull().references(() => notificationEndpoints.id, { onDelete: "cascade" }),
+  purpose: text("purpose").notNull(),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+}, (table) => [
+  uniqueIndex("person_notification_endpoint_binding_unique").on(table.personId, table.endpointId, table.purpose),
+  uniqueIndex("person_notification_endpoint_one_calendar_invite").on(table.personId).where(sql`${table.purpose} = 'calendar_invite'`),
+]);
 
 export const meetings = pgTable("meetings", {
   id: uuid("id").defaultRandom().primaryKey(),
@@ -176,6 +211,9 @@ export const meetings = pgTable("meetings", {
   location: text("location"),
   notes: text("notes"),
   createdByUserId: uuid("created_by_user_id").notNull().references(() => users.id),
+  createdByPersonId: uuid("created_by_person_id").references(() => organizationPeople.id),
+  initiatedViaIntegrationId: uuid("initiated_via_integration_id").references(() => organizationClientIntegrations.id),
+  statusAnnouncementEndpointId: uuid("status_announcement_endpoint_id").references(() => notificationEndpoints.id, { onDelete: "set null" }),
   notificationClient: text("notification_client").notNull().default("discord"),
   notificationChannelId: text("notification_channel_id").notNull(),
   version: integer("version").notNull().default(1),
@@ -197,11 +235,15 @@ export const meetingParticipants = pgTable("meeting_participants", {
   id: uuid("id").defaultRandom().primaryKey(),
   meetingId: uuid("meeting_id").notNull().references(() => meetings.id, { onDelete: "cascade" }),
   memberId: uuid("member_id").references(() => members.id),
+  personId: uuid("person_id").references(() => organizationPeople.id, { onDelete: "set null" }),
   kind: text("kind").notNull().default("registered_member"),
   displayNameSnapshot: text("display_name_snapshot").notNull(),
   calendarInviteEmailSnapshot: text("calendar_invite_email_snapshot").notNull(),
   attendanceRole: text("attendance_role").notNull().default("required"),
-}, (table) => [uniqueIndex("meeting_participants_meeting_email_unique").on(table.meetingId, table.calendarInviteEmailSnapshot)]);
+}, (table) => [
+  uniqueIndex("meeting_participants_meeting_email_unique").on(table.meetingId, table.calendarInviteEmailSnapshot),
+  uniqueIndex("meeting_participants_meeting_person_unique").on(table.meetingId, table.personId).where(sql`${table.personId} IS NOT NULL`),
+]);
 
 /** Tasks are independent from Calendar. sourceIntegrationId chooses their direct-notification route. */
 export const tasks = pgTable("tasks", {
@@ -241,6 +283,7 @@ export const taskReminderDeliveries = pgTable("task_reminder_deliveries", {
   id: uuid("id").defaultRandom().primaryKey(),
   assignmentId: uuid("assignment_id").notNull().references(() => taskAssignments.id, { onDelete: "cascade" }),
   integrationId: uuid("integration_id").notNull().references(() => organizationClientIntegrations.id),
+  endpointId: uuid("endpoint_id").references(() => notificationEndpoints.id),
   reminderRevision: integer("reminder_revision").notNull(),
   scheduledFor: timestamp("scheduled_for", { withTimezone: true }).notNull(),
   status: taskReminderDeliveryStatus("status").notNull(),
@@ -253,6 +296,9 @@ export const planningSessions = pgTable("planning_sessions", {
   id: uuid("id").defaultRandom().primaryKey(),
   organizationId: uuid("organization_id").notNull().references(() => organizations.id, { onDelete: "cascade" }),
   createdByUserId: uuid("created_by_user_id").notNull().references(() => users.id),
+  createdByPersonId: uuid("created_by_person_id").references(() => organizationPeople.id),
+  initiatedViaIntegrationId: uuid("initiated_via_integration_id").references(() => organizationClientIntegrations.id),
+  statusAnnouncementEndpointId: uuid("status_announcement_endpoint_id").references(() => notificationEndpoints.id, { onDelete: "set null" }),
   kind: planningSessionKind("kind").notNull(),
   sourceMeetingId: uuid("source_meeting_id").references(() => meetings.id, { onDelete: "cascade" }),
   notificationClient: text("notification_client").notNull().default("discord"),
@@ -274,11 +320,31 @@ export const planningAttendees = pgTable("planning_attendees", {
   planningSessionId: uuid("planning_session_id").notNull().references(() => planningSessions.id, { onDelete: "cascade" }),
   userId: uuid("user_id").references(() => users.id, { onDelete: "set null" }),
   memberId: uuid("member_id").references(() => members.id, { onDelete: "set null" }),
+  personId: uuid("person_id").references(() => organizationPeople.id, { onDelete: "set null" }),
   displayName: text("display_name").notNull(),
-  source: jsonb("source").notNull().$type<{ kind: "person" | "group"; client: string; subjectId: string }>(),
+  source: jsonb("source").notNull().$type<Record<string, unknown>>(),
   readiness: planningAttendeeReadiness("readiness").notNull(),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
-}, (table) => [uniqueIndex("planning_attendees_session_user_unique").on(table.planningSessionId, table.userId)]);
+}, (table) => [
+  uniqueIndex("planning_attendees_session_user_unique").on(table.planningSessionId, table.userId),
+  uniqueIndex("planning_attendees_session_person_unique").on(table.planningSessionId, table.personId).where(sql`${table.personId} IS NOT NULL`),
+]);
+
+/** Each audience selection is retained before the effective audience is deduplicated. */
+export const planningAudienceSelections = pgTable("planning_audience_selections", {
+  id: uuid("id").defaultRandom().primaryKey(),
+  planningSessionId: uuid("planning_session_id").notNull().references(() => planningSessions.id, { onDelete: "cascade" }),
+  selectedByPersonId: uuid("selected_by_person_id").notNull().references(() => organizationPeople.id),
+  integrationId: uuid("integration_id").references(() => organizationClientIntegrations.id, { onDelete: "set null" }),
+  source: jsonb("source").notNull().$type<Record<string, unknown>>(),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+});
+
+export const planningAudienceSelectionPeople = pgTable("planning_audience_selection_people", {
+  selectionId: uuid("selection_id").notNull().references(() => planningAudienceSelections.id, { onDelete: "cascade" }),
+  personId: uuid("person_id").notNull().references(() => organizationPeople.id, { onDelete: "cascade" }),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+}, (table) => [primaryKey({ columns: [table.selectionId, table.personId] })]);
 
 export const planningLaunchTokens = pgTable("planning_launch_tokens", {
   id: uuid("id").defaultRandom().primaryKey(),
@@ -312,6 +378,7 @@ export const providerInstallations = pgTable("provider_installations", {
   status: providerInstallationStatus("status").notNull().default("configuring"),
   values: jsonb("values").notNull().$type<Record<string, string>>().default({}),
   configuredByUserId: uuid("configured_by_user_id").notNull().references(() => users.id),
+  configuredByPersonId: uuid("configured_by_person_id").references(() => organizationPeople.id),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
 }, (table) => [uniqueIndex("provider_installations_org_provider_unique").on(table.organizationId, table.providerId)]);
@@ -322,6 +389,7 @@ export const roomBookings = pgTable("room_bookings", {
   meetingId: uuid("meeting_id").notNull().references(() => meetings.id, { onDelete: "cascade" }),
   providerInstallationId: uuid("provider_installation_id").notNull().references(() => providerInstallations.id),
   createdByUserId: uuid("created_by_user_id").notNull().references(() => users.id),
+  createdByPersonId: uuid("created_by_person_id").references(() => organizationPeople.id),
   status: roomBookingStatus("status").notNull().default("discovering"),
   room: jsonb("room").$type<Record<string, unknown>>(),
   providerReference: text("provider_reference"),
@@ -362,3 +430,32 @@ export const outboxEvents = pgTable("outbox_events", {
   lastError: text("last_error"),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 }, (table) => [uniqueIndex("outbox_events_type_aggregate_version_unique").on(table.type, table.aggregateId, table.expectedVersion)]);
+
+/** Operational records make the resumable backfill observable and reviewable. */
+export const genericPersonMigrationRuns = pgTable("generic_person_migration_runs", {
+  id: uuid("id").defaultRandom().primaryKey(),
+  status: text("status").notNull(),
+  startedAt: timestamp("started_at", { withTimezone: true }).notNull().defaultNow(),
+  completedAt: timestamp("completed_at", { withTimezone: true }),
+  summary: jsonb("summary").notNull().$type<Record<string, unknown>>().default({}),
+});
+
+export const genericPersonMigrationProgress = pgTable("generic_person_migration_progress", {
+  organizationId: uuid("organization_id").primaryKey().references(() => organizations.id, { onDelete: "cascade" }),
+  runId: uuid("run_id").references(() => genericPersonMigrationRuns.id, { onDelete: "set null" }),
+  phase: text("phase").notNull(),
+  lastLegacyUserId: uuid("last_legacy_user_id"),
+  lastLegacyMemberId: uuid("last_legacy_member_id"),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+});
+
+export const genericPersonMigrationConflicts = pgTable("generic_person_migration_conflicts", {
+  id: uuid("id").defaultRandom().primaryKey(),
+  organizationId: uuid("organization_id").notNull().references(() => organizations.id, { onDelete: "cascade" }),
+  kind: text("kind").notNull(),
+  legacyUserId: uuid("legacy_user_id"),
+  legacyMemberId: uuid("legacy_member_id"),
+  detail: jsonb("detail").notNull().$type<Record<string, unknown>>().default({}),
+  resolvedAt: timestamp("resolved_at", { withTimezone: true }),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+}, (table) => [uniqueIndex("generic_person_migration_conflict_unique").on(table.organizationId, table.kind, table.legacyUserId, table.legacyMemberId)]);

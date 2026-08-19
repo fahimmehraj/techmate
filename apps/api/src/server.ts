@@ -52,19 +52,20 @@ Bun.serve({
         if (saved.kind === "organizer") {
           await repository.setOrganizerConnection({
             organizationId: saved.organizationId,
+            authorizedByPersonId: saved.personId!,
             accountEmail: connected.email,
             encryptedRefreshToken: connected.encryptedRefreshToken,
           });
           return html("Tech@NYU organizer calendar connected. You can return to Discord.");
         }
-        if (!saved.memberId) return html("This availability authorization is not attached to a member.", 400);
+        if (!saved.personId) return html("This availability authorization is not attached to a person.", 400);
         await repository.upsertAvailabilityConnection({
           organizationId: saved.organizationId,
-          memberId: saved.memberId,
+          personId: saved.personId,
           accountEmail: connected.email,
           encryptedRefreshToken: connected.encryptedRefreshToken,
         });
-        await repository.refreshPlanningReadinessForMember(saved.memberId);
+        await repository.refreshPlanningReadinessForPerson(saved.personId);
         return html("Your Google availability is connected. You can return to Discord.");
       }
       return new Response("Not found", { status: 404 });

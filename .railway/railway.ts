@@ -32,7 +32,7 @@ export default defineRailway((ctx) => {
     source: github(repository, { branch: "main" }),
     build: {
       builder: "RAILPACK",
-      buildCommand: "bun --filter @technyu/web build",
+      buildCommand: "bun scripts/check-production-safety.ts && bun --filter @technyu/web build",
       watchPatterns: apiWatchPaths,
     },
     preDeploy: ["bun run db:migrate"],

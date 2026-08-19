@@ -5,6 +5,8 @@ on:
     paths:
       - ".railway/**"
       - ".github/workflows/railway-infrastructure.yml"
+      - "packages/db/**"
+      - "scripts/check-production-safety.ts"
       - "package.json"
       - "bun.lock"
       - "tsconfig.json"
@@ -13,6 +15,8 @@ on:
     paths:
       - ".railway/**"
       - ".github/workflows/railway-infrastructure.yml"
+      - "packages/db/**"
+      - "scripts/check-production-safety.ts"
       - "package.json"
       - "bun.lock"
       - "tsconfig.json"
@@ -32,6 +36,7 @@ jobs:
           bun-version: "1.3.13"
       - run: bun install --frozen-lockfile
       - run: bun run typecheck
+      - run: bun scripts/check-production-safety.ts
 
   apply:
     name: Apply production infrastructure

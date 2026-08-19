@@ -25,7 +25,7 @@ The RoomProvider interface is available in `@technyu/application`. The eLab/Once
 5. Once PostgreSQL is healthy, synchronize the local database directly from the Drizzle schema with `bun run db:push` in a second terminal.
 6. Register commands with `bun scripts/register-discord-commands.ts`.
 
-Use `bun run dev:api`, `bun run dev:infra`, or `bun run dev:rooms` to run one process alone. `bun run dev:infra` starts just the local PostgreSQL, Redis, and Inngest stack. `bun run typecheck` and `bun test` use Turbo's cache for the repository-wide check. `bun run db:push` is the canonical development schema command; `bun run db:studio` opens Drizzle Studio. `bun run db:migrate` is the production migration command and is run only by the API service before deployment.
+Use `bun run dev:api`, `bun run dev:infra`, or `bun run dev:rooms` to run one process alone. `bun run dev:infra` starts just the local PostgreSQL, Redis, and Inngest stack. `bun run typecheck` and `bun test` use Turbo's cache for the repository-wide check. `bun run db:push` is the canonical development schema command and accepts only localhost databases by default; it is disabled in Railway and production. `bun run db:studio` opens Drizzle Studio. `bun run db:migrate` is the production migration command and is run only by the API service before deployment.
 
 `bun dev` is the public-development command. It requires `NGROK_DOMAIN`, starts ngrok with `--domain`, and exports `APP_BASE_URL=https://$NGROK_DOMAIN` to every Turbo task. Use that stable origin for Discord's interaction endpoint and Google's redirect URI. Use `bun run dev:local` when no public tunnel is wanted.
 
@@ -40,6 +40,10 @@ To reset local state, run `docker compose --env-file .env -f infra/local/compose
 Production uses the API as the single public endpoint. The Vite planner remains a separate build workspace: Railway builds `apps/web/dist` as part of the API deployment, and the API serves it at `/plan/*`. It is not a standalone Railway service.
 
 The self-hosted production workflow stack consists of the public API, private room worker, private Inngest image service, application PostgreSQL, dedicated Inngest PostgreSQL, and Redis. [`.railway/railway.ts`](.railway/railway.ts) is the single Railway infrastructure definition; it owns service sources, deploy settings, managed databases, and private-network references. The bootstrap process and Railway-managed secret inventory live in [`.railway/README.md`](.railway/README.md). The Vite workspace is deliberately not a Railway service.
+
+### Live-data deployment policy
+
+Production migrations are immutable, checksummed, and protected by a transaction-scoped PostgreSQL advisory lock. A deployment refuses to run against a schema containing a migration unknown to that revision; legacy bootstrap migrations also refuse to run against an already populated database with incomplete migration history. The automatic path is additive-only: no drops, truncation, data rewrites, incompatible column changes, or concurrent indexes. Railway runs the same safety check during the API build before its pre-deploy migration command. Any destructive database operation requires a separately reviewed manual runbook and must never be added to the API pre-deploy command. Railway infrastructure CI intentionally omits destructive-plan confirmation, so it cannot silently delete a managed resource.
 
 ## Job observability
 

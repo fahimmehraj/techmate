@@ -1,10 +1,11 @@
 import { directMeetingInputSchema, confirmMeeting, startDirectMeeting, type OutboxPublisher } from "@technyu/application";
-import { candidateSlots, type ClientInvocation, type OrganizationSetupState } from "@technyu/core";
+import { candidateSlots, type ActorContext, type OrganizationSetupState } from "@technyu/core";
 import type { PostgresCoordinatorRepository } from "@technyu/db";
 import { createCodeVerifier, createGoogleAuthorizationUrl, createState } from "../google/oauth.ts";
 import { getGoogleBusyIntervals } from "../google/calendar.ts";
 import { BuiltInRoomProviderRegistry } from "../rooms/registry.ts";
 import { listDiscordPeopleWithRole, sendDiscordDm } from "./rest.ts";
+import { planningEnrollmentDmContent } from "./planning-enrollment.ts";
 import { extractMentionableAudience, mentionableAudienceSelect } from "./planning.ts";
 import { dueDatePage, dueHourSelect, dueMinuteSelect, reminderPolicySelect, savedTeamSelect, taskComposer, taskListSelect, teamListSelect } from "./tasks.ts";
 import { buttonRow, initialPrompt, json, message, modal, prompt, replacePrompt, textInput, updateMessage, type DiscordPrompt } from "./responses.ts";
@@ -22,7 +23,32 @@ type DiscordInteraction = {
 };
 type ModalRow = { components?: Array<{ custom_id?: string; value?: string }> };
 type PromptResponseMode = "initial" | "replace";
+type DiscordInvocation = Partial<ActorContext> & {
+  idempotencyKey: string;
+  discordGuildId?: string;
+  discordUserId: string;
+  discordRoleIds: string[];
+  isAdministrator: boolean;
+  channelId: string;
+};
 const roomProviders = new BuiltInRoomProviderRegistry();
+
+function requireActor(invocation: DiscordInvocation): ActorContext {
+  if (!invocation.organizationId || !invocation.integrationId || !invocation.personId) throw new Error("Run /setup first.");
+  return {
+    idempotencyKey: invocation.idempotencyKey,
+    organizationId: invocation.organizationId,
+    integrationId: invocation.integrationId,
+    personId: invocation.personId,
+    capabilities: invocation.capabilities ?? new Set<"organization:admin">(),
+  };
+}
+
+async function discordChannelEndpoint(invocation: DiscordInvocation, repository: PostgresCoordinatorRepository) {
+  const actor = requireActor(invocation);
+  if (!invocation.channelId) throw new Error("A Discord channel is required for this action.");
+  return repository.upsertNotificationEndpoint({ organizationId: actor.organizationId, integrationId: actor.integrationId, driverId: "discord.channel", address: invocation.channelId });
+}
 
 function respondToPrompt(view: DiscordPrompt, mode: PromptResponseMode = "initial") {
   return mode === "replace" ? replacePrompt(view) : initialPrompt(view);
@@ -40,7 +66,9 @@ export async function handleDiscordInteraction(request: Request, repository: Pos
   }
   const interaction = JSON.parse(body) as DiscordInteraction;
   if (interaction.type === 1) return json({ type: 1 });
-  const invocation = await repository.resolveInvocation(toInvocation(interaction));
+  const transport = toInvocation(interaction);
+  const actor = await repository.resolveDiscordActor({ guildId: transport.discordGuildId, discordUserId: transport.discordUserId, idempotencyKey: transport.idempotencyKey, isAdministrator: transport.isAdministrator });
+  const invocation: DiscordInvocation = { ...transport, ...actor };
   try {
     if (interaction.type === 2) return json(await handleCommand(interaction, invocation, repository, outboxPublisher));
     if (interaction.type === 3) return json(await handleComponent(interaction, invocation, repository, outboxPublisher));
@@ -51,7 +79,7 @@ export async function handleDiscordInteraction(request: Request, repository: Pos
   }
 }
 
-async function handleCommand(interaction: DiscordInteraction, invocation: ClientInvocation, repository: PostgresCoordinatorRepository, outboxPublisher: OutboxPublisher) {
+async function handleCommand(interaction: DiscordInteraction, invocation: DiscordInvocation, repository: PostgresCoordinatorRepository, outboxPublisher: OutboxPublisher) {
   switch (interaction.data?.name) {
     case "setup": {
       if (!interaction.guild_id || !invocation.isAdministrator) throw new Error("Only a Discord Administrator can run /setup.");
@@ -70,9 +98,9 @@ async function handleCommand(interaction: DiscordInteraction, invocation: Client
       });
     }
     case "profile": {
-      if (!invocation.organizationId || !invocation.userId) throw new Error("An administrator must run /setup first.");
-      const profile = await repository.getProfile(invocation.userId);
-      if (!profile.member) return profileModal("profile:register", "Register your profile");
+      if (!invocation.organizationId || !invocation.personId) throw new Error("An administrator must run /setup first.");
+      const profile = await repository.getPersonProfile(invocation.personId);
+      if (!profile?.calendarInviteEndpoint) return profileModal("profile:register", "Register your profile");
       return initialPrompt(await profilePrompt(invocation, repository));
     }
     case "settings": {
@@ -92,12 +120,12 @@ async function handleCommand(interaction: DiscordInteraction, invocation: Client
       if (subcommand(interaction) === "reschedule") return modal("meeting:reschedule", "Choose a meeting to reschedule", [textInput("meeting_id", "Meeting ID", { placeholder: "UUID from the Calendar announcement" })]);
       return beginPlanningSession(invocation, repository, "create");
     case "provider":
-      if (!invocation.organizationId || !invocation.userId) throw new Error("An administrator must run /setup first.");
+      if (!invocation.organizationId || !invocation.personId) throw new Error("An administrator must run /setup first.");
       if (subcommand(interaction) === "list") return providerList(invocation.organizationId, repository);
       if (!invocation.isAdministrator) throw new Error("Only a Discord Administrator can configure providers.");
       if (subcommand(interaction) === "configure") return onceHubConfigStepOne();
       if (subcommand(interaction) === "disable") {
-        const installation = await repository.disableProviderInstallation(invocation.organizationId, "elab-oncehub", invocation.userId);
+        const installation = await repository.disableProviderInstallation(invocation.organizationId, "elab-oncehub", invocation.personId);
         return message(installation ? "OnceHub is disabled for this server." : "OnceHub is not configured.", { ephemeral: true });
       }
       throw new Error("Use /provider list, /provider configure, or /provider disable.");
@@ -110,7 +138,7 @@ async function handleCommand(interaction: DiscordInteraction, invocation: Client
   }
 }
 
-async function handleTaskCommand(interaction: DiscordInteraction, invocation: ClientInvocation, repository: PostgresCoordinatorRepository, outboxPublisher: OutboxPublisher) {
+async function handleTaskCommand(interaction: DiscordInteraction, invocation: DiscordInvocation, repository: PostgresCoordinatorRepository, outboxPublisher: OutboxPublisher) {
   if (!invocation.organizationId || !invocation.personId || !invocation.integrationId) throw new Error("Run /setup first.");
   const command = subcommand(interaction) ?? "list";
   if (command === "create") return modal("task:create", "Create task", [
@@ -122,14 +150,14 @@ async function handleTaskCommand(interaction: DiscordInteraction, invocation: Cl
   throw new Error("Use /task create, /task list, or /task preferences.");
 }
 
-async function handleTeamCommand(interaction: DiscordInteraction, invocation: ClientInvocation, repository: PostgresCoordinatorRepository) {
+async function handleTeamCommand(interaction: DiscordInteraction, invocation: DiscordInvocation, repository: PostgresCoordinatorRepository) {
   if (!invocation.organizationId || !invocation.personId) throw new Error("Run /setup first.");
   const command = subcommand(interaction) ?? "list";
   if (command === "create") return modal("team:create", "Create saved team", [textInput("name", "Team name", { placeholder: "Marketing" })]);
   return renderTeamList(invocation, repository);
 }
 
-async function renderTaskComposer(taskId: string, invocation: ClientInvocation, repository: PostgresCoordinatorRepository, mode: PromptResponseMode = "initial") {
+async function renderTaskComposer(taskId: string, invocation: DiscordInvocation, repository: PostgresCoordinatorRepository, mode: PromptResponseMode = "initial") {
   if (!invocation.organizationId || !invocation.personId) throw new Error("Run /setup first.");
   const task = await repository.getTaskForCreator({ taskId, creatorPersonId: invocation.personId });
   if (!task) throw new Error("Only the task creator can edit this task.");
@@ -137,7 +165,7 @@ async function renderTaskComposer(taskId: string, invocation: ClientInvocation, 
   return respondToPrompt(taskComposer({ task, assignments, teams }), mode);
 }
 
-async function renderTaskList(invocation: ClientInvocation, repository: PostgresCoordinatorRepository, mode: PromptResponseMode = "initial") {
+async function renderTaskList(invocation: DiscordInvocation, repository: PostgresCoordinatorRepository, mode: PromptResponseMode = "initial") {
   if (!invocation.organizationId || !invocation.personId) throw new Error("Run /setup first.");
   const [entries, created] = await Promise.all([
     repository.listTasksForPerson({ organizationId: invocation.organizationId, personId: invocation.personId }),
@@ -171,7 +199,7 @@ async function renderTaskList(invocation: ClientInvocation, repository: Postgres
   return respondToPrompt(prompt(`**Assigned to you**\n${assignedText}\n\n**Created by you**\n${createdText}${problems.length ? `\n\n⚠️ ${problems.length} task reminder delivery issue(s). Open a task you created or assigned to yourself for details.` : ""}`, components), mode);
 }
 
-async function renderTaskCard(assignmentId: string, invocation: ClientInvocation, repository: PostgresCoordinatorRepository, mode: PromptResponseMode = "initial") {
+async function renderTaskCard(assignmentId: string, invocation: DiscordInvocation, repository: PostgresCoordinatorRepository, mode: PromptResponseMode = "initial") {
   if (!invocation.organizationId || !invocation.personId) throw new Error("Run /setup first.");
   const entries = await repository.listTasksForPerson({ organizationId: invocation.organizationId, personId: invocation.personId, includeCompleted: true });
   const entry = entries.find((candidate) => candidate.assignment.id === assignmentId);
@@ -187,14 +215,14 @@ async function renderTaskCard(assignmentId: string, invocation: ClientInvocation
   return respondToPrompt(prompt(`**${entry.task.title}**\n${entry.task.description ?? "No description."}\nDue: ${due}\nCreated by: ${entry.creatorName}\nYour status: ${entry.assignment.status}${failure}`, components), mode);
 }
 
-async function renderTeamList(invocation: ClientInvocation, repository: PostgresCoordinatorRepository, mode: PromptResponseMode = "initial") {
+async function renderTeamList(invocation: DiscordInvocation, repository: PostgresCoordinatorRepository, mode: PromptResponseMode = "initial") {
   if (!invocation.organizationId) throw new Error("Run /setup first.");
   const teams = await repository.listTeams(invocation.organizationId);
   const content = teams.length ? `**Saved teams**\n${teams.map((team) => `• ${team.name}`).join("\n")}` : "No saved teams yet. Use /team create to make one.";
   return respondToPrompt(prompt(content, [teamListSelect(teams)]), mode);
 }
 
-async function renderTeamCard(teamId: string, invocation: ClientInvocation, repository: PostgresCoordinatorRepository, mode: PromptResponseMode = "initial") {
+async function renderTeamCard(teamId: string, invocation: DiscordInvocation, repository: PostgresCoordinatorRepository, mode: PromptResponseMode = "initial") {
   if (!invocation.organizationId || !invocation.personId) throw new Error("Run /setup first.");
   const team = await repository.getTeam({ organizationId: invocation.organizationId, teamId });
   if (!team) throw new Error("That saved team no longer exists.");
@@ -212,7 +240,7 @@ async function renderTeamCard(teamId: string, invocation: ClientInvocation, repo
  * the assignment they carry instead. This keeps the DM route scoped to exactly
  * one task and avoids guessing which organization a Discord account means.
  */
-async function resolveTaskAssignmentInvocation(invocation: ClientInvocation, assignmentId: string, repository: PostgresCoordinatorRepository) {
+async function resolveTaskAssignmentInvocation(invocation: DiscordInvocation, assignmentId: string, repository: PostgresCoordinatorRepository) {
   if (invocation.organizationId && invocation.personId && invocation.integrationId) return invocation;
   if (!invocation.discordUserId) throw new Error("Unable to identify your Discord account.");
   const actor = await repository.resolveTaskAssignmentDiscordActor({ assignmentId, discordUserId: invocation.discordUserId });
@@ -220,7 +248,7 @@ async function resolveTaskAssignmentInvocation(invocation: ClientInvocation, ass
   return { ...invocation, ...actor };
 }
 
-async function handleComponent(interaction: DiscordInteraction, invocation: ClientInvocation, repository: PostgresCoordinatorRepository, outboxPublisher: OutboxPublisher) {
+async function handleComponent(interaction: DiscordInteraction, invocation: DiscordInvocation, repository: PostgresCoordinatorRepository, outboxPublisher: OutboxPublisher) {
   const [kind, value, extra] = interaction.data?.custom_id?.split(":") ?? [];
   if (kind === "task-select") {
     const assignmentId = interaction.data?.values?.[0];
@@ -336,7 +364,7 @@ async function handleComponent(interaction: DiscordInteraction, invocation: Clie
     return renderTeamCard(value, invocation, repository, "replace");
   }
   if (kind === "meeting-confirm" && value) {
-    const events = await confirmMeeting(repository, invocation, value);
+    const events = await confirmMeeting(repository, requireActor(invocation), value);
     const outcomes = await outboxPublisher.publish(events);
     return replacePrompt(prompt(handoffMessage(outcomes, "Creating the Google Calendar event now. The channel will receive the event link when it succeeds.", "Meeting confirmed. Calendar synchronization is queued for automatic retry.")));
   }
@@ -344,16 +372,16 @@ async function handleComponent(interaction: DiscordInteraction, invocation: Clie
   if (kind === "plan-team" && value) return addPlanningTeamAudience(interaction, invocation, repository, value);
   if (kind === "plan-enroll" && value) return continuePlanningEnrollment(interaction, repository, value);
   if (kind === "room-start" && value) {
-    if (!invocation.organizationId || !invocation.userId) throw new Error("Run /setup first.");
+    if (!invocation.organizationId || !invocation.personId) throw new Error("Run /setup first.");
     const installation = await repository.getProviderInstallation(invocation.organizationId, "elab-oncehub");
     if (!installation || installation.status !== "enabled") throw new Error("Configure eLab / OnceHub in /provider configure before finding a room.");
-    const booking = await repository.createRoomBooking({ meetingId: value, providerInstallationId: installation.id, createdBy: invocation.userId });
+    const booking = await repository.createRoomBooking({ meetingId: value, providerInstallationId: installation.id, createdByPersonId: invocation.personId });
     const outcomes = await outboxPublisher.publish(booking.outboxEvents);
     return replacePrompt(prompt(handoffMessage(outcomes, "Searching eLab availability now. The result will be posted in this channel.", "Room search is queued for automatic retry.")));
   }
   if (kind === "room-submit" && value) {
-    if (!invocation.userId) throw new Error("Unable to resolve the current user.");
-    const booking = await repository.submitRoomBooking(value, invocation.userId);
+    if (!invocation.personId) throw new Error("Unable to resolve the current person.");
+    const booking = await repository.submitRoomBooking(value, invocation.personId);
     const outcomes = await outboxPublisher.publish(booking.outboxEvents);
     return replacePrompt(prompt(handoffMessage(outcomes, "Submitting the eLab room request now. Calendar invitations will follow only if OnceHub accepts the request.", "Room submission is queued for automatic retry.")));
   }
@@ -366,7 +394,7 @@ async function handleComponent(interaction: DiscordInteraction, invocation: Clie
     return onceHubConfigStepTwo();
   }
   if (kind === "meeting-slot" && value && extra) {
-    if (!(await repository.canManageMeeting(value, invocation))) throw new Error("Only the meeting creator can choose a meeting time.");
+    if (!(await repository.canManageMeeting(value, requireActor(invocation)))) throw new Error("Only the meeting creator can choose a meeting time.");
     const meeting = await repository.chooseCandidateSlot({ meetingId: value, candidateId: extra });
     if (!meeting.time) throw new Error("The selected candidate is missing its time.");
     return replacePrompt(prompt(`Selected **${meeting.title}**\n${formatTime(meeting.time.startsAt, meeting.timeZone)}\nReview and send Calendar invitations when ready.\nMeeting ID: \`${meeting.id}\``, [buttonRow({ customId: `meeting-confirm:${meeting.id}`, label: "Confirm and send invites", style: 3 }, { customId: `room-start:${meeting.id}`, label: "Find an eLab room" })]));
@@ -374,20 +402,20 @@ async function handleComponent(interaction: DiscordInteraction, invocation: Clie
   if (kind === "setup" && value === "connect-organizer") return startGoogleConnection(repository, invocation, "organizer", "replace");
   if (kind === "profile" && value === "connect-availability") return startGoogleConnection(repository, invocation, "availability", "replace");
   if (kind === "profile" && value === "disconnect-availability") {
-    if (!invocation.userId) throw new Error("Unable to resolve the current user.");
-    const removed = await repository.disconnectAvailability(invocation.userId);
+    if (!invocation.personId) throw new Error("Unable to resolve the current person.");
+    const removed = await repository.disconnectAvailability(invocation.personId);
     return replacePrompt(await profilePrompt(invocation, repository, removed ? "Availability connection removed." : "No availability connection was active."));
   }
   if (kind === "profile" && value === "edit") {
-    if (!invocation.userId) throw new Error("Unable to resolve the current user.");
-    const profile = await repository.getProfile(invocation.userId);
-    if (!profile.member) throw new Error("Register your profile first.");
-    return profileModal("profile:edit", "Edit your profile", profile.member.displayName, profile.member.calendarInviteEmail);
+    if (!invocation.personId) throw new Error("Unable to resolve the current person.");
+    const profile = await repository.getPersonProfile(invocation.personId);
+    if (!profile?.calendarInviteEndpoint) throw new Error("Register your profile first.");
+    return profileModal("profile:edit", "Edit your profile", profile.person.displayName, profile.calendarInviteEndpoint.address);
   }
   throw new Error("This action has expired.");
 }
 
-async function handleModal(interaction: DiscordInteraction, invocation: ClientInvocation, repository: PostgresCoordinatorRepository, outboxPublisher: OutboxPublisher) {
+async function handleModal(interaction: DiscordInteraction, invocation: DiscordInvocation, repository: PostgresCoordinatorRepository, outboxPublisher: OutboxPublisher) {
   const values = modalValues(interaction.data?.components ?? []);
   if (interaction.data?.custom_id === "task:create") {
     if (!invocation.organizationId || !invocation.personId || !invocation.integrationId) throw new Error("Run /setup first.");
@@ -414,16 +442,16 @@ async function handleModal(interaction: DiscordInteraction, invocation: ClientIn
     return renderTeamCard(team.id, invocation, repository);
   }
   if (interaction.data?.custom_id === "profile:register" || interaction.data?.custom_id === "profile:edit") {
-    if (!invocation.organizationId || !invocation.userId) throw new Error("An administrator must run /setup first.");
-    const member = await repository.registerMember({
+    if (!invocation.organizationId || !invocation.personId) throw new Error("An administrator must run /setup first.");
+    const profile = await repository.registerPersonProfile({
       organizationId: invocation.organizationId,
-      userId: invocation.userId,
+      personId: invocation.personId,
       displayName: requiredValue(values, "display_name"),
       inviteEmail: requiredValue(values, "invite_email"),
     });
-    const outcomes = await outboxPublisher.publish(member.outboxEvents);
-    const resync = member.outboxEvents.length ? ` ${handoffMessage(outcomes, "Existing future Calendar invitations are being updated.", "Existing future Calendar invitations are queued for automatic retry.")}` : "";
-    return initialPrompt(await profilePrompt(invocation, repository, `Profile saved. Future Calendar invitations will be sent to ${member.calendarInviteEmail}.${resync}`));
+    const outcomes = await outboxPublisher.publish(profile.outboxEvents);
+    const resync = profile.outboxEvents.length ? ` ${handoffMessage(outcomes, "Existing future Calendar invitations are being updated.", "Existing future Calendar invitations are queued for automatic retry.")}` : "";
+    return initialPrompt(await profilePrompt(invocation, repository, `Profile saved. Future Calendar invitations will be sent to ${profile.endpoint.address}.${resync}`));
   }
   if (interaction.data?.custom_id?.startsWith("plan-enroll-email:")) {
     const attendeeId = interaction.data.custom_id.slice("plan-enroll-email:".length);
@@ -438,21 +466,20 @@ async function handleModal(interaction: DiscordInteraction, invocation: ClientIn
     if (Number.isNaN(startsAt.valueOf())) throw new Error("Start time must be a valid ISO-8601 timestamp with timezone.");
     const attendees = await resolveAttendees(requiredValue(values, "attendees"), invocation, repository);
     if (attendees.length === 0) throw new Error("Include at least one attendee.");
-    const meeting = await startDirectMeeting(repository, invocation, directMeetingInputSchema.parse({
+    const endpoint = await discordChannelEndpoint(invocation, repository);
+    const meeting = await startDirectMeeting(repository, requireActor(invocation), directMeetingInputSchema.parse({
       title: requiredValue(values, "title"),
       startsAt,
       durationMinutes: Number(requiredValue(values, "duration_minutes")),
       timezone: "America/New_York",
       location: values.location || undefined,
-    }));
+    }), endpoint.id);
     for (const attendee of attendees) {
-      const member = attendee;
       await repository.addParticipant({
         meetingId: meeting.id,
-        memberId: member.id as never,
-        kind: "registered_member",
-        displayNameSnapshot: member.displayName,
-        calendarInviteEmailSnapshot: member.calendarInviteEmail as never,
+        kind: "email_guest",
+        displayNameSnapshot: attendee.displayName,
+        calendarInviteEmailSnapshot: attendee.calendarInviteEmail as never,
         attendanceRole: "required",
       });
     }
@@ -464,33 +491,33 @@ async function handleModal(interaction: DiscordInteraction, invocation: ClientIn
   }
   if (interaction.data?.custom_id === "meeting:find") return submitDiscovery(values, invocation, repository);
   if (interaction.data?.custom_id === "provider:oncehub-step1") {
-    if (!invocation.organizationId || !invocation.userId) throw new Error("Run /setup first.");
+    if (!invocation.organizationId || !invocation.personId) throw new Error("Run /setup first.");
     if (!invocation.isAdministrator) throw new Error("Only a Discord Administrator can configure providers.");
-    await repository.saveProviderInstallation({ organizationId: invocation.organizationId, providerId: "elab-oncehub", status: "configuring", configuredBy: invocation.userId, values: {
+    await repository.saveProviderInstallation({ organizationId: invocation.organizationId, providerId: "elab-oncehub", status: "configuring", configuredByPersonId: invocation.personId, values: {
       firstName: requiredValue(values, "first_name"), lastName: requiredValue(values, "last_name"), nyuEmail: requiredValue(values, "nyu_email"), netId: requiredValue(values, "net_id"), organizationName: requiredValue(values, "organization_name"),
     } });
     return message("Requester details saved. Continue with the organization details.", { ephemeral: true, components: [buttonRow({ customId: "provider:oncehub-step2", label: "Continue eLab setup", style: 3 })] });
   }
   if (interaction.data?.custom_id === "provider:oncehub-step2") {
-    if (!invocation.organizationId || !invocation.userId) throw new Error("Run /setup first.");
+    if (!invocation.organizationId || !invocation.personId) throw new Error("Run /setup first.");
     if (!invocation.isAdministrator) throw new Error("Only a Discord Administrator can configure providers.");
     const existing = await repository.getProviderInstallation(invocation.organizationId, "elab-oncehub");
     if (!existing) throw new Error("Start eLab setup from the first step.");
     const provider = roomProviders.get("elab-oncehub")!;
     const config = provider.validateOrganizationValues({ ...existing.values, affiliation: requiredValue(values, "affiliation"), school: requiredValue(values, "school"), graduationYear: values.graduation_year?.trim() ?? "" });
-    await repository.saveProviderInstallation({ organizationId: invocation.organizationId, providerId: "elab-oncehub", status: "enabled", configuredBy: invocation.userId, values: config });
+    await repository.saveProviderInstallation({ organizationId: invocation.organizationId, providerId: "elab-oncehub", status: "enabled", configuredByPersonId: invocation.personId, values: config });
     return message("eLab / OnceHub is enabled for this server.", { ephemeral: true });
   }
   if (interaction.data?.custom_id === "meeting:cancel") return cancelMeeting(values, invocation, repository, outboxPublisher);
   if (interaction.data?.custom_id === "meeting:reschedule") {
     const meetingId = requiredValue(values, "meeting_id");
-    if (!(await repository.canManageMeeting(meetingId, invocation))) throw new Error("Only the meeting creator can reschedule it.");
+    if (!(await repository.canManageMeeting(meetingId, requireActor(invocation)))) throw new Error("Only the meeting creator can reschedule it.");
     return beginPlanningSession(invocation, repository, "reschedule", meetingId);
   }
   throw new Error("This form has expired.");
 }
 
-async function resolveDiscordAudience(interaction: DiscordInteraction, invocation: ClientInvocation, repository: PostgresCoordinatorRepository) {
+async function resolveDiscordAudience(interaction: DiscordInteraction, invocation: DiscordInvocation, repository: PostgresCoordinatorRepository) {
   if (!invocation.integrationId || !interaction.guild_id) throw new Error("This action must run inside the configured Discord server.");
   const selections = extractMentionableAudience(interaction.data ?? {});
   const candidates: Array<{ subjectId: string; displayName: string }> = [];
@@ -507,7 +534,7 @@ async function resolveDiscordAudience(interaction: DiscordInteraction, invocatio
   return repository.upsertIntegrationPeople({ integrationId: invocation.integrationId, people: unique });
 }
 
-async function saveTaskDueDate(taskId: string, date: string, hour: number, minute: number, invocation: ClientInvocation, repository: PostgresCoordinatorRepository, outboxPublisher: OutboxPublisher) {
+async function saveTaskDueDate(taskId: string, date: string, hour: number, minute: number, invocation: DiscordInvocation, repository: PostgresCoordinatorRepository, outboxPublisher: OutboxPublisher) {
   if (!invocation.personId) throw new Error("Unable to resolve the current person.");
   const task = await repository.getTaskForCreator({ taskId, creatorPersonId: invocation.personId });
   if (!task) throw new Error("Only the task creator can set this due date.");
@@ -546,61 +573,51 @@ function discoveryModal() {
   ]);
 }
 
-async function beginPlanningSession(invocation: ClientInvocation, repository: PostgresCoordinatorRepository, kind: "create" | "reschedule", sourceMeetingId?: string) {
-  if (!invocation.organizationId || !invocation.userId) throw new Error("An administrator must run /setup first.");
-  const session = await repository.createPlanningSession({ organizationId: invocation.organizationId, createdByUserId: invocation.userId, notificationChannelId: invocation.channelId, kind, sourceMeetingId });
+async function beginPlanningSession(invocation: DiscordInvocation, repository: PostgresCoordinatorRepository, kind: "create" | "reschedule", sourceMeetingId?: string) {
+  const actor = requireActor(invocation);
+  const endpoint = await discordChannelEndpoint(invocation, repository);
+  const session = await repository.createPlanningSession({ organizationId: actor.organizationId, createdByPersonId: actor.personId, initiatedViaIntegrationId: actor.integrationId, statusAnnouncementEndpointId: endpoint.id, kind, sourceMeetingId });
   return message("Start by selecting the Discord users and roles who should attend. The interactive calendar opens after that.", {
     ephemeral: true,
-    components: [mentionableAudienceSelect(session.id), savedTeamSelect(`plan-team:${session.id}`, await repository.listTeams(invocation.organizationId))],
+    components: [mentionableAudienceSelect(session.id), savedTeamSelect(`plan-team:${session.id}`, await repository.listTeams(actor.organizationId))],
   });
 }
 
-async function addPlanningAudience(interaction: DiscordInteraction, invocation: ClientInvocation, repository: PostgresCoordinatorRepository, sessionId: string) {
-  if (!invocation.organizationId || !invocation.userId || !interaction.guild_id) throw new Error("Planning must happen inside the configured Discord server.");
+async function addPlanningAudience(interaction: DiscordInteraction, invocation: DiscordInvocation, repository: PostgresCoordinatorRepository, sessionId: string) {
+  const actor = requireActor(invocation);
+  if (!interaction.guild_id) throw new Error("Planning must happen inside the configured Discord server.");
   const loaded = await repository.getPlanningSession(sessionId);
-  if (!loaded || loaded.session.organizationId !== invocation.organizationId || loaded.session.createdBy !== invocation.userId) throw new Error("Only the person who started this planning session can edit it.");
+  if (!loaded || loaded.session.organizationId !== actor.organizationId || loaded.session.createdByPersonId !== actor.personId) throw new Error("Only the person who started this planning session can edit it.");
   const selections = extractMentionableAudience(interaction.data ?? {});
   for (const selection of selections) {
     if (selection.kind === "person") {
-      await repository.addDiscordPlanningAudience({
-        planningSessionId: sessionId,
-        organizationId: invocation.organizationId,
-        source: { kind: "person", client: "discord", subjectId: selection.id },
-        discordUserIds: [{ id: selection.id, displayName: selection.displayName }],
-      });
+      const people = await repository.upsertIntegrationPeople({ integrationId: actor.integrationId, people: [{ subjectId: selection.id, displayName: selection.displayName }] });
+      await repository.addPlanningAudience({ planningSessionId: sessionId, actor, source: { kind: "client_group", integrationId: actor.integrationId, subjectId: selection.id }, people: people.map((person) => ({ personId: person.id, displayName: person.displayName })) });
       continue;
     }
     const people = await listDiscordPeopleWithRole(interaction.guild_id, selection.id);
-    await repository.addDiscordPlanningAudience({
-      planningSessionId: sessionId,
-      organizationId: invocation.organizationId,
-      source: { kind: "group", client: "discord", subjectId: selection.id },
-      discordUserIds: people.map((person) => ({ id: person.id, displayName: person.displayName })),
-    });
+    const resolved = await repository.upsertIntegrationPeople({ integrationId: actor.integrationId, people: people.map((person) => ({ subjectId: person.id, displayName: person.displayName })) });
+    await repository.addPlanningAudience({ planningSessionId: sessionId, actor, source: { kind: "client_group", integrationId: actor.integrationId, subjectId: selection.id }, people: resolved.map((person) => ({ personId: person.id, displayName: person.displayName })) });
   }
-  return finishPlanningAudience(sessionId, repository);
+  return finishPlanningAudience(sessionId, invocation.discordUserId, repository);
 }
 
-async function addPlanningTeamAudience(interaction: DiscordInteraction, invocation: ClientInvocation, repository: PostgresCoordinatorRepository, sessionId: string) {
-  if (!invocation.organizationId || !invocation.userId || !invocation.integrationId || !interaction.guild_id) throw new Error("Planning must happen inside the configured Discord server.");
+async function addPlanningTeamAudience(interaction: DiscordInteraction, invocation: DiscordInvocation, repository: PostgresCoordinatorRepository, sessionId: string) {
+  const actor = requireActor(invocation);
+  if (!interaction.guild_id) throw new Error("Planning must happen inside the configured Discord server.");
   const loaded = await repository.getPlanningSession(sessionId);
-  if (!loaded || loaded.session.organizationId !== invocation.organizationId || loaded.session.createdBy !== invocation.userId) throw new Error("Only the person who started this planning session can edit it.");
+  if (!loaded || loaded.session.organizationId !== actor.organizationId || loaded.session.createdByPersonId !== actor.personId) throw new Error("Only the person who started this planning session can edit it.");
   const teamId = interaction.data?.values?.[0];
   if (!teamId) throw new Error("Choose a saved team.");
-  const teamPeople = await repository.getTeamPeople({ organizationId: invocation.organizationId, teamId });
+  const teamPeople = await repository.getTeamPeople({ organizationId: actor.organizationId, teamId });
   if (!teamPeople.length) throw new Error("That saved team has no active members.");
-  const discordPeople = await repository.getIntegrationPeople({ integrationId: invocation.integrationId, personIds: teamPeople.map((person) => person.id) });
+  const discordPeople = await repository.getIntegrationPeople({ integrationId: actor.integrationId, personIds: teamPeople.map((person) => person.id) });
   if (discordPeople.length !== teamPeople.length) throw new Error("Every saved-team member needs an active Discord identity before it can be used for Discord meeting planning.");
-  await repository.addDiscordPlanningAudience({
-    planningSessionId: sessionId,
-    organizationId: invocation.organizationId,
-    source: { kind: "group", client: "discord", subjectId: `team:${teamId}` },
-    discordUserIds: discordPeople.map((person) => ({ id: person.subjectId, displayName: person.displayName })),
-  });
-  return finishPlanningAudience(sessionId, repository);
+  await repository.addPlanningAudience({ planningSessionId: sessionId, actor, source: { kind: "team", teamId: teamId as never }, people: discordPeople.map((person) => ({ personId: person.personId, displayName: person.displayName })) });
+  return finishPlanningAudience(sessionId, invocation.discordUserId, repository);
 }
 
-async function finishPlanningAudience(sessionId: string, repository: PostgresCoordinatorRepository) {
+async function finishPlanningAudience(sessionId: string, plannerDiscordUserId: string, repository: PostgresCoordinatorRepository) {
   const refreshed = await repository.getPlanningSession(sessionId);
   if (!refreshed) throw new Error("This planning session disappeared.");
   const pending = refreshed.attendees.filter((attendee) => attendee.readiness !== "ready" && attendee.readiness !== "unverified");
@@ -612,12 +629,12 @@ async function finishPlanningAudience(sessionId: string, repository: PostgresCoo
   const requests = await repository.listPlanningEnrollmentRequests(sessionId);
   await Promise.allSettled(requests.map(async (request) => {
     if (request.readiness === "needs_invite_email") {
-      return sendDiscordDm(request.discordUserId, "A Tech@NYU meeting planner needs your calendar invite email.", [buttonRow({ customId: `plan-enroll:${request.attendeeId}`, label: "Add invite email", style: 3 })]);
+      return sendDiscordDm(request.discordUserId, planningEnrollmentDmContent(plannerDiscordUserId, "invite_email"), [buttonRow({ customId: `plan-enroll:${request.attendeeId}`, label: "Add invite email", style: 3 })]);
     }
     const enrollment = await repository.getPlanningEnrollment(request.attendeeId, request.discordUserId);
-    if (!enrollment?.member) return;
-    const url = await createPlanningAvailabilityUrl(repository, { organizationId: enrollment.session.organizationId, userId: enrollment.user.id, memberId: enrollment.member.id, displayName: enrollment.member.displayName });
-    return sendDiscordDm(request.discordUserId, "A Tech@NYU meeting planner needs your Google free/busy availability.", [buttonRow({ label: "Connect Google availability", url })]);
+    if (!enrollment?.person.invitationEmail) return;
+    const url = await createPlanningAvailabilityUrl(repository, { organizationId: enrollment.session.organizationId, personId: enrollment.person.id, displayName: enrollment.person.displayName });
+    return sendDiscordDm(request.discordUserId, planningEnrollmentDmContent(plannerDiscordUserId, "availability"), [buttonRow({ label: "Connect Google availability", url })]);
   }));
   const status = pending.length
     ? `${pending.length} attendee(s) still need an invite email or Google availability. They will appear as pending in the planner.`
@@ -634,15 +651,15 @@ async function continuePlanningEnrollment(interaction: DiscordInteraction, repos
   if (!discordUserId) throw new Error("Unable to identify your Discord account.");
   const enrollment = await repository.getPlanningEnrollment(attendeeId, discordUserId);
   if (!enrollment) throw new Error("This enrollment request has expired.");
-  if (!enrollment.member) return modal(`plan-enroll-email:${attendeeId}`, "Add calendar invite email", [textInput("invite_email", "Calendar invite email", { placeholder: "you@example.com" })]);
-  const url = await createPlanningAvailabilityUrl(repository, { organizationId: enrollment.session.organizationId, userId: enrollment.user.id, memberId: enrollment.member.id, displayName: enrollment.member.displayName });
+  if (!enrollment.person.invitationEmail) return modal(`plan-enroll-email:${attendeeId}`, "Add calendar invite email", [textInput("invite_email", "Calendar invite email", { placeholder: "you@example.com" })]);
+  const url = await createPlanningAvailabilityUrl(repository, { organizationId: enrollment.session.organizationId, personId: enrollment.person.id, displayName: enrollment.person.displayName });
   return replacePrompt(prompt("Connect Google availability so the planner can display only your busy times.", [buttonRow({ label: "Connect Google availability", url })]));
 }
 
-async function createPlanningAvailabilityUrl(repository: PostgresCoordinatorRepository, enrollment: { organizationId: string; userId: string; memberId: string; displayName: string }) {
+async function createPlanningAvailabilityUrl(repository: PostgresCoordinatorRepository, enrollment: { organizationId: string; personId: string; displayName: string }) {
   const state = createState();
   const codeVerifier = createCodeVerifier();
-  await repository.createOauthState({ state, organizationId: enrollment.organizationId, userId: enrollment.userId, memberId: enrollment.memberId, kind: "availability", codeVerifier });
+  await repository.createOauthState({ state, organizationId: enrollment.organizationId, personId: enrollment.personId, kind: "availability", codeVerifier });
   return createGoogleAuthorizationUrl({ state, codeVerifier, kind: "availability" });
 }
 
@@ -689,8 +706,8 @@ function renderSetupDashboard(setup: OrganizationSetupState) {
 }
 
 
-async function submitDiscovery(values: Record<string, string>, invocation: ClientInvocation, repository: PostgresCoordinatorRepository) {
-  if (!invocation.organizationId || !invocation.userId) throw new Error("An administrator must run /setup first.");
+async function submitDiscovery(values: Record<string, string>, invocation: DiscordInvocation, repository: PostgresCoordinatorRepository) {
+  const actor = requireActor(invocation);
   const startsAt = parseDateTime(requiredValue(values, "window_start"), "Earliest start");
   const endsAt = parseDateTime(requiredValue(values, "window_end"), "Latest end");
   const durationMinutes = Number(requiredValue(values, "duration_minutes"));
@@ -699,25 +716,23 @@ async function submitDiscovery(values: Record<string, string>, invocation: Clien
   const attendees = await resolveAttendees(requiredValue(values, "attendees"), invocation, repository);
   if (!attendees.length) throw new Error("Include at least one attendee.");
   const meeting = await repository.createDiscoveryMeeting({
-    organizationId: invocation.organizationId,
+    organizationId: actor.organizationId,
     mode: "discovery",
     status: "discovering",
     title: requiredValue(values, "title"),
     timeZone: "America/New_York",
     discoveryWindow: { startsAt, endsAt },
-    createdBy: invocation.userId,
-    notificationTarget: { client: "discord", channelId: invocation.channelId },
+    createdByPersonId: actor.personId,
+    initiatedViaIntegrationId: actor.integrationId,
+    statusAnnouncementEndpointId: (await discordChannelEndpoint(invocation, repository)).id,
   });
   const memberIds: string[] = [];
   for (const attendee of attendees) {
-    const member = attendee;
-    memberIds.push(member.id);
     await repository.addParticipant({
       meetingId: meeting.id,
-      memberId: member.id as never,
-      kind: "registered_member",
-      displayNameSnapshot: member.displayName,
-      calendarInviteEmailSnapshot: member.calendarInviteEmail as never,
+      kind: "email_guest",
+      displayNameSnapshot: attendee.displayName,
+      calendarInviteEmailSnapshot: attendee.calendarInviteEmail as never,
       attendanceRole: "required",
     });
   }
@@ -748,9 +763,9 @@ async function submitDiscovery(values: Record<string, string>, invocation: Clien
   });
 }
 
-async function cancelMeeting(values: Record<string, string>, invocation: ClientInvocation, repository: PostgresCoordinatorRepository, outboxPublisher: OutboxPublisher) {
+async function cancelMeeting(values: Record<string, string>, invocation: DiscordInvocation, repository: PostgresCoordinatorRepository, outboxPublisher: OutboxPublisher) {
   const meetingId = requiredValue(values, "meeting_id");
-  if (!(await repository.canManageMeeting(meetingId, invocation))) throw new Error("Only the meeting creator can cancel it.");
+  if (!(await repository.canManageMeeting(meetingId, requireActor(invocation)))) throw new Error("Only the meeting creator can cancel it.");
   const cancellation = await repository.cancelMeeting(meetingId);
   const outcomes = await outboxPublisher.publish(cancellation.outboxEvents);
   return message(cancellation.calendarEventExisted
@@ -769,12 +784,12 @@ function profileModal(customId: string, title: string, displayName?: string, inv
   ]);
 }
 
-async function profilePrompt(invocation: ClientInvocation, repository: PostgresCoordinatorRepository, notice?: string): Promise<DiscordPrompt> {
-  if (!invocation.userId) throw new Error("Unable to resolve the current user.");
-  const profile = await repository.getProfile(invocation.userId);
-  if (!profile.member) throw new Error("Register your profile before managing it.");
+async function profilePrompt(invocation: DiscordInvocation, repository: PostgresCoordinatorRepository, notice?: string): Promise<DiscordPrompt> {
+  if (!invocation.personId) throw new Error("Unable to resolve the current person.");
+  const profile = await repository.getPersonProfile(invocation.personId);
+  if (!profile?.calendarInviteEndpoint) throw new Error("Register your profile before managing it.");
   const connected = profile.availability ? `connected as ${profile.availability.accountEmail}` : "not connected";
-  return prompt(`${notice ? `${notice}\n\n` : ""}**Profile**\nCalendar invitations: ${profile.member.calendarInviteEmail}\nAvailability: ${connected}`, [buttonRow(
+  return prompt(`${notice ? `${notice}\n\n` : ""}**Profile**\nCalendar invitations: ${profile.calendarInviteEndpoint.address}\nAvailability: ${connected}`, [buttonRow(
     { customId: "profile:edit", label: "Edit profile" },
     profile.availability
       ? { customId: "profile:disconnect-availability", label: "Disconnect availability", style: 4 }
@@ -784,23 +799,22 @@ async function profilePrompt(invocation: ClientInvocation, repository: PostgresC
 
 async function startGoogleConnection(
   repository: PostgresCoordinatorRepository,
-  invocation: ClientInvocation,
+  invocation: DiscordInvocation,
   kind: "organizer" | "availability",
   mode: PromptResponseMode = "initial",
 ) {
-  if (!invocation.organizationId || !invocation.userId) throw new Error("An administrator must run /setup first.");
+  const actor = requireActor(invocation);
   if (kind === "organizer" && !invocation.isAdministrator) {
     throw new Error("Only a Discord Administrator can connect the organizer calendar.");
   }
-  const member = kind === "availability" ? await repository.getMemberForUser(invocation.userId) : undefined;
-  if (kind === "availability" && !member) throw new Error("Register your profile before connecting availability.");
+  const profile = kind === "availability" ? await repository.getPersonProfile(actor.personId) : undefined;
+  if (kind === "availability" && !profile?.calendarInviteEndpoint) throw new Error("Register your profile before connecting availability.");
   const state = createState();
   const codeVerifier = createCodeVerifier();
   await repository.createOauthState({
     state,
-    organizationId: invocation.organizationId,
-    userId: invocation.userId,
-    memberId: member?.id,
+    organizationId: actor.organizationId,
+    personId: actor.personId,
     kind,
     codeVerifier,
   });
@@ -811,11 +825,10 @@ async function startGoogleConnection(
     : "Authorize only free/busy access for the Google account you want to use when finding meeting times.", [buttonRow({ label, url: authorizationUrl })]), mode);
 }
 
-function toInvocation(interaction: DiscordInteraction): Omit<ClientInvocation, "organizationId" | "userId"> {
+function toInvocation(interaction: DiscordInteraction): DiscordInvocation {
   const permissions = BigInt(interaction.member?.permissions ?? "0");
   return {
     idempotencyKey: interaction.id,
-    client: "discord",
     discordGuildId: interaction.guild_id,
     discordUserId: interaction.member?.user.id ?? interaction.user?.id ?? "",
     discordRoleIds: interaction.member?.roles ?? [],
@@ -832,18 +845,18 @@ function requiredValue(values: Record<string, string>, key: string) {
   if (!value) throw new Error(`${key.replaceAll("_", " ")} is required.`);
   return value;
 }
-async function resolveAttendees(value: string, invocation: ClientInvocation, repository: PostgresCoordinatorRepository) {
+async function resolveAttendees(value: string, invocation: DiscordInvocation, repository: PostgresCoordinatorRepository) {
   if (!invocation.organizationId) throw new Error("An administrator must run /setup first.");
-  const resolved = [] as Array<{ id: string; displayName: string; calendarInviteEmail: string }>;
+  const resolved = [] as Array<{ displayName: string; calendarInviteEmail: string }>;
   const seenEmails = new Set<string>();
   for (const line of value.split("\n").map((line) => line.trim()).filter(Boolean)) {
     const match = /^(.*?)\s*<([^<>\s]+@[^<>\s]+)>$/.exec(line);
     if (!match?.[1] || !match[2]) throw new Error(`Use Name <email> for every attendee: ${line}`);
-    addResolved(await repository.addOrReuseExternalMember({ organizationId: invocation.organizationId, name: match[1].trim(), email: match[2].trim() }));
+    addResolved({ displayName: match[1].trim(), calendarInviteEmail: match[2].trim().toLowerCase() });
   }
   return resolved;
 
-  function addResolved(member: { id: string; displayName: string; calendarInviteEmail: string }) {
+  function addResolved(member: { displayName: string; calendarInviteEmail: string }) {
     const email = member.calendarInviteEmail.toLowerCase();
     if (!seenEmails.has(email)) {
       seenEmails.add(email);

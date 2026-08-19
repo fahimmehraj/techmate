@@ -19,10 +19,12 @@
     "test:all": "bun test tests",
     "typecheck": "turbo run typecheck:all --filter=//",
     "typecheck:all": "bunx tsc --noEmit",
-    "db:push": "bun --env-file=.env ./node_modules/.bin/drizzle-kit push --config=packages/db/drizzle.config.ts",
+    "db:push": "bun --env-file=.env packages/db/src/assert-local-schema-push.ts && bun --env-file=.env ./node_modules/.bin/drizzle-kit push --config=packages/db/drizzle.config.ts",
     "db:studio": "bun --env-file=.env ./node_modules/.bin/drizzle-kit studio --config=packages/db/drizzle.config.ts",
     "db:generate": "bun --env-file=.env ./node_modules/.bin/drizzle-kit generate --config=packages/db/drizzle.config.ts",
-    "db:migrate": "bun packages/db/src/migrate.ts"
+    "db:migrate": "bun packages/db/src/migrate.ts",
+    "db:backfill-generic": "bun packages/db/src/backfill-generic-person.ts",
+    "db:validate-generic": "bun packages/db/src/backfill-generic-person.ts --validate"
   },
   "devDependencies": {
     "@types/bun": "latest",
